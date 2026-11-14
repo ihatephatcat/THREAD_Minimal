@@ -2,11 +2,10 @@ import {
   Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, ParseUUIDPipe, Patch, Post, Query,
 } from '@nestjs/common';
 import {
-  ApiBadRequestResponse, ApiBearerAuth, ApiExtraModels, ApiForbiddenResponse,
-  ApiNoContentResponse, ApiNotFoundResponse, ApiOkResponse, ApiOperation, ApiParam, ApiTags,
-  ApiUnauthorizedResponse, getSchemaPath,
+  ApiBadRequestResponse, ApiBearerAuth, ApiForbiddenResponse, ApiNoContentResponse,
+  ApiNotFoundResponse, ApiOperation, ApiParam, ApiTags, ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
-import { ApiDataResponse } from '../../common/http/openapi';
+import { ApiDataResponse, ApiPageResponse } from '../../common/http/openapi';
 import { Page, PageQueryDto } from '../../common/http/pagination';
 import { CurrentUser, Roles } from '../auth/auth.decorators';
 import { Role, type AuthenticatedUser } from '../auth/role';
@@ -35,26 +34,7 @@ export class AddressController {
 
   @Get()
   @ApiOperation({ summary: 'List addresses owned by the signed-in customer, newest first' })
-  @ApiExtraModels(AddressResponseDto)
-  @ApiOkResponse({
-    schema: {
-      type: 'object',
-      required: ['success', 'data', 'meta'],
-      properties: {
-        success: { type: 'boolean', example: true },
-        data: { type: 'array', items: { $ref: getSchemaPath(AddressResponseDto) } },
-        meta: {
-          type: 'object',
-          required: ['page', 'limit', 'total'],
-          properties: {
-            page: { type: 'integer', minimum: 1 },
-            limit: { type: 'integer', minimum: 1 },
-            total: { type: 'integer', minimum: 0 },
-          },
-        },
-      },
-    },
-  })
+  @ApiPageResponse(AddressResponseDto)
   @ApiBadRequestResponse({ description: 'Invalid pagination query' })
   list(
     @CurrentUser() user: AuthenticatedUser,

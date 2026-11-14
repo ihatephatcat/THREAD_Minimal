@@ -5,6 +5,10 @@ import { InventoryModule } from '../inventory/inventory.module';
 import { StaffModule } from '../staff/staff.module';
 import { AddressController } from './address.controller';
 import { AddressService } from './address.service';
+import { CartController } from './cart.controller';
+import { CartService } from './cart.service';
+import { OrderHistoryController } from './order-history.controller';
+import { OrderHistoryService } from './order-history.service';
 import { ProfileController } from './profile.controller';
 import { ProfileService } from './profile.service';
 
@@ -14,7 +18,7 @@ import { ProfileService } from './profile.service';
     StaffModule,
     InventoryModule,
   ],
-  controllers: [ProfileController, AddressController],
-  providers: [ProfileService, AddressService],
+  controllers: [ProfileController, AddressController, CartController, OrderHistoryController],
+  providers: [ProfileService, AddressService, CartService, OrderHistoryService],
 })
 export class CustomerModule {}
