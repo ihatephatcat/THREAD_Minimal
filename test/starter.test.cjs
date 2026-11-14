@@ -6,7 +6,9 @@ const { ValidationPipe } = require('@nestjs/common');
 const { validateAppEnvironment } = require('../dist/config/environment');
 const { RegisterDto } = require('../dist/modules/auth/auth.dto');
 const { hashPassword, verifyPassword } = require('../dist/modules/auth/password');
-const { CreateAddressDto, UpdateAddressDto } = require('../dist/modules/customer/customer.dto');
+const {
+  CreateAddressDto, UpdateAddressDto, UpdateProfileDto,
+} = require('../dist/modules/customer/customer.dto');
 const { Page, PageQueryDto } = require('../dist/common/http/pagination');
 
 const env = {
@@ -46,6 +48,15 @@ test('address create requires its fields and update accepts partial values', asy
   assert.equal(data.city, 'Dhaka');
   assert.equal(data.line2, null);
   await assert.rejects(transform(UpdateAddressDto, { city: null }));
+});
+
+test('profile DTO trims the name and rejects invalid names and unexpected fields', async () => {
+  const data = await transform(UpdateProfileDto, { name: ' Sam ' });
+  assert.equal(data.name, 'Sam');
+  for (const input of [{}, { name: ' ' }, { name: null }, { name: 'X'.repeat(101) }]) {
+    await assert.rejects(transform(UpdateProfileDto, input));
+  }
+  await assert.rejects(transform(UpdateProfileDto, { name: 'Sam', role: 'admin' }));
 });
 
 test('pagination converts query values, caps page size, and keeps total', async () => {

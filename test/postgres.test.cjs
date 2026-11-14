@@ -11,11 +11,12 @@ if (!testDatabase || testDatabase === process.env.DB_NAME) {
 process.env.DB_NAME = testDatabase;
 
 const { NestFactory } = require('@nestjs/core');
+const { JwtService } = require('@nestjs/jwt');
 const { DataSource } = require('typeorm');
 const { AppModule } = require('../dist/app.module');
 const { configureApp } = require('../dist/configure-app');
 const {
-  Cart, CartItem, Category, Collection, InventoryMovement, InventoryStock,
+  Address, Cart, CartItem, Category, Collection, InventoryMovement, InventoryStock,
   Order, OrderItem, Product, ProductVariant, User,
 } = require('../dist/database/entities');
 const { CatalogService } = require('../dist/modules/staff/catalog.service');
@@ -44,7 +45,29 @@ async function request(path, { method = 'GET', body, token } = {}) {
   const response = await fetch(`${url}/api${path}`, {
     method, headers, body: body === undefined ? undefined : JSON.stringify(body),
   });
-  return { response, body: await response.json() };
+  return { response, body: response.status === 204 ? await response.text() : await response.json() };
+}
+
+async function createActor(label, role = Role.Customer) {
+  const user = await insert(User, {
+    email: email(label), name: 'Test Actor', role, passwordHash: await hashPassword(password),
+  });
+  const token = await app.get(JwtService).signAsync({ sub: user.id });
+  return { user, token };
+}
+
+const addressInput = {
+  recipientName: 'Sam Rahman', phone: '0123456789', line1: 'Test street',
+  city: 'Dhaka', postalCode: '1200', countryCode: 'BD',
+};
+
+function assertError(result, status, message) {
+  assert.equal(result.response.status, status);
+  assert.equal(result.body.success, false);
+  assert.equal(result.body.statusCode, status);
+  assert.ok(result.body.requestId);
+  assert.equal(result.body.requestId, result.response.headers.get('x-request-id'));
+  if (message) assert.equal(result.body.message, message);
 }
 
 before(async () => {
@@ -78,6 +101,51 @@ test('health and Swagger expose the runnable starter', async () => {
   const doc = await request('/docs-json');
   assert.ok(doc.body.paths['/api/auth/register']?.post);
   assert.deepEqual(doc.body.paths['/api/admin/access'].get.security, [{ bearer: [] }]);
+});
+
+test('Swagger documents customer routes, validation, and pagination', async () => {
+  const { body: doc } = await request('/docs-json');
+  const routes = [
+    ['get', '/api/customers/me', 200],
+    ['patch', '/api/customers/me', 200, 'UpdateProfileDto'],
+    ['post', '/api/addresses', 201, 'CreateAddressDto'],
+    ['get', '/api/addresses', 200],
+    ['get', '/api/addresses/{id}', 200],
+    ['patch', '/api/addresses/{id}', 200, 'UpdateAddressDto'],
+    ['delete', '/api/addresses/{id}', 204],
+  ];
+  const schemaPath = (name) => `#/components/schemas/${name}`;
+  for (const [method, path, successStatus, dto] of routes) {
+    const operation = doc.paths[path][method];
+    assert.ok(operation.summary);
+    assert.deepEqual(operation.security, [{ bearer: [] }]);
+    assert.ok(operation.responses[successStatus]);
+    assert.ok(operation.responses[401]);
+    assert.ok(operation.responses[403]);
+    if (dto) {
+      assert.equal(operation.requestBody.content['application/json'].schema.$ref, schemaPath(dto));
+    }
+    if (dto || path.startsWith('/api/addresses')) assert.ok(operation.responses[400]);
+    if (path.endsWith('{id}')) {
+      assert.ok(operation.responses[404]);
+      const idParam = operation.parameters.find(({ name }) => name === 'id');
+      assert.equal(idParam.schema.format, 'uuid');
+      assert.equal(idParam.required, true);
+    }
+  }
+
+  const list = doc.paths['/api/addresses'].get;
+  assert.equal(list.parameters.length, 2);
+  for (const [name, defaultValue, maximum] of [['page', 1, 100_000], ['limit', 20, 100]]) {
+    const param = list.parameters.find((item) => item.name === name);
+    assert.equal(param.in, 'query');
+    assert.equal(param.required, false);
+    assert.deepEqual(param.schema, { type: 'integer', default: defaultValue, minimum: 1, maximum });
+  }
+  const { properties } = list.responses[200].content['application/json'].schema;
+  assert.equal(properties.data.items.$ref, schemaPath('AddressResponseDto'));
+  assert.deepEqual(properties.meta.required, ['page', 'limit', 'total']);
+  assert.equal(doc.paths['/api/addresses/{id}'].delete.responses[204].content, undefined);
 });
 
 test('registration, login, authorization, and account deactivation', async () => {
@@ -132,6 +200,169 @@ test('registration, login, authorization, and account deactivation', async () =>
   const missing = await request('/unused-route');
   assert.equal(missing.response.status, 404);
   assert.equal(missing.body.success, false);
+});
+
+test('customers can read their own public profile and update only their name', async () => {
+  const { user, token } = await createActor('profile');
+  const expected = { id: user.id, email: user.email, name: user.name, role: Role.Customer };
+  const initial = await request('/customers/me', { token });
+  assert.equal(initial.response.status, 200);
+  assert.deepEqual(initial.body, { success: true, data: expected });
+
+  const updated = await request('/customers/me', {
+    method: 'PATCH', token, body: { name: ' Sam Rahman ' },
+  });
+  const renamed = { ...expected, name: 'Sam Rahman' };
+  assert.equal(updated.response.status, 200);
+  assert.deepEqual(updated.body, { success: true, data: renamed });
+
+  const invalidProfiles = [
+    {}, { name: ' ' }, { name: null }, { name: 'Sam\0' }, { name: 'Sam', email: 'other@example.com' },
+  ];
+  for (const body of invalidProfiles) {
+    assertError(await request('/customers/me', { method: 'PATCH', token, body }), 400);
+  }
+  assert.deepEqual((await request('/customers/me', { token })).body.data, renamed);
+  assert.equal((await db.getRepository(User).findOneByOrFail({ id: user.id })).name, 'Sam Rahman');
+});
+
+test('every customer route requires a JWT and the Customer role', async () => {
+  const { token } = await createActor('customer-routes-admin', Role.Admin);
+  const addressPath = `/addresses/${randomUUID()}`;
+  const routes = [
+    ['GET', '/customers/me'],
+    ['PATCH', '/customers/me', { name: 'New name' }],
+    ['GET', '/addresses'],
+    ['POST', '/addresses', addressInput],
+    ['GET', addressPath],
+    ['PATCH', addressPath, { city: 'Rajshahi' }],
+    ['DELETE', addressPath],
+  ];
+  for (const [method, path, body] of routes) {
+    assertError(await request(path, { method, body }), 401);
+    assertError(await request(path, { method, body, token }), 403);
+  }
+});
+
+test('customers can create, retrieve, update, and delete an owned address', async () => {
+  const { user, token } = await createActor('address-crud');
+  const created = await request('/addresses', { method: 'POST', body: addressInput, token });
+  assert.equal(created.response.status, 201);
+  const { id, createdAt, updatedAt } = created.body.data;
+  assert.match(id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  assert.equal(new Date(createdAt).toISOString(), createdAt);
+  assert.equal(new Date(updatedAt).toISOString(), updatedAt);
+  assert.deepEqual(created.body, {
+    success: true, data: { ...addressInput, id, line2: null, createdAt, updatedAt },
+  });
+  const addressPath = `/addresses/${id}`;
+  const repo = db.getRepository(Address);
+  assert.equal((await repo.findOneByOrFail({ id })).userId, user.id);
+  const fetched = await request(addressPath, { token });
+  assert.equal(fetched.response.status, 200);
+  assert.deepEqual(fetched.body, created.body);
+
+  const changes = { city: 'Rajshahi', line2: 'Flat 2A' };
+  const updated = await request(addressPath, { method: 'PATCH', body: changes, token });
+  assert.equal(updated.response.status, 200);
+  assert.deepEqual(updated.body, {
+    success: true, data: { ...created.body.data, ...changes, updatedAt: updated.body.data.updatedAt },
+  });
+  const cleared = await request(addressPath, { method: 'PATCH', body: { line2: null }, token });
+  assert.equal(cleared.response.status, 200);
+  assert.equal(cleared.body.data.line2, null);
+  const stored = await repo.findOneByOrFail({ id, userId: user.id });
+  assert.equal(stored.line2, null);
+  assert.equal(stored.city, changes.city);
+  const noChange = await request(addressPath, { method: 'PATCH', body: {}, token });
+  assert.equal(noChange.response.status, 200);
+  assert.deepEqual(noChange.body, cleared.body);
+
+  const deleted = await request(addressPath, { method: 'DELETE', token });
+  assert.equal(deleted.response.status, 204);
+  assert.equal(deleted.body, '');
+  assert.equal(await repo.countBy({ id }), 0);
+  assertError(await request(addressPath, { token }), 404, 'Address not found');
+  assertError(await request(addressPath, { method: 'DELETE', token }), 404, 'Address not found');
+});
+
+test('address pagination counts only owned rows and sorts by creation time and ID', async () => {
+  const { user, token } = await createActor('address-list');
+  const { user: other } = await createActor('address-list-other');
+  const createdAt = new Date('2026-01-02T00:00:00Z');
+  const [thirdId, firstId, secondId] = [randomUUID(), randomUUID(), randomUUID()].sort();
+  const rows = [
+    { id: secondId, createdAt },
+    { id: firstId, createdAt },
+    { id: thirdId, createdAt: new Date('2026-01-01T00:00:00Z') },
+  ];
+  for (const row of rows) {
+    await insert(Address, { ...addressInput, ...row, userId: user.id });
+  }
+  await insert(Address, { ...addressInput, userId: other.id });
+
+  const defaults = await request('/addresses', { token });
+  assert.equal(defaults.response.status, 200);
+  assert.equal(defaults.body.success, true);
+  assert.deepEqual(defaults.body.meta, { page: 1, limit: 20, total: 3 });
+  assert.deepEqual(defaults.body.data.map(({ id }) => id), [firstId, secondId, thirdId]);
+
+  const second = await request('/addresses?page=2&limit=1', { token });
+  assert.equal(second.response.status, 200);
+  assert.deepEqual(second.body.meta, { page: 2, limit: 1, total: 3 });
+  assert.deepEqual(second.body.data.map(({ id }) => id), [secondId]);
+
+  const beyond = await request('/addresses?page=4&limit=1', { token });
+  assert.equal(beyond.response.status, 200);
+  assert.deepEqual(beyond.body, { success: true, data: [], meta: { page: 4, limit: 1, total: 3 } });
+});
+
+test('address routes reject invalid DTO fields, pagination, and UUIDs', async () => {
+  const { user, token } = await createActor('address-validation');
+  const { id } = await insert(Address, { ...addressInput, userId: user.id });
+  const createBodies = [
+    {},
+    { ...addressInput, countryCode: 'bd' },
+    { ...addressInput, line1: 'A\0B' },
+    { ...addressInput, userId: randomUUID() },
+  ];
+  for (const body of createBodies) {
+    assertError(await request('/addresses', { method: 'POST', body, token }), 400);
+  }
+  for (const body of [{ city: null }, { phone: 123 }, { line2: 'A\0B' }, { userId: randomUUID() }]) {
+    assertError(await request(`/addresses/${id}`, { method: 'PATCH', body, token }), 400);
+  }
+  for (const query of ['page=0', 'page=1.5', 'limit=101', 'limit=1&limit=2', 'owner=other']) {
+    assertError(await request(`/addresses?${query}`, { token }), 400);
+  }
+  for (const invalidId of ['invalid', '123e4567-e89b-12d3-a456-426614174000']) {
+    const path = `/addresses/${invalidId}`;
+    assertError(await request(path, { token }), 400);
+    assertError(await request(path, { method: 'PATCH', body: { city: 'Rajshahi' }, token }), 400);
+    assertError(await request(path, { method: 'DELETE', token }), 400);
+  }
+  const repo = db.getRepository(Address);
+  assert.equal(await repo.countBy({ userId: user.id }), 1);
+  assert.equal((await repo.findOneByOrFail({ id })).city, addressInput.city);
+});
+
+test('missing and unowned address IDs return the same 404 for reads and writes', async () => {
+  const { user, token } = await createActor('address-owner');
+  const { token: otherToken } = await createActor('address-non-owner');
+  const { id } = await insert(Address, { ...addressInput, userId: user.id });
+  const missing = randomUUID();
+  for (const blocked of [id, missing]) {
+    const path = `/addresses/${blocked}`;
+    const options = { token: otherToken };
+    assertError(await request(path, options), 404, 'Address not found');
+    assertError(await request(path, {
+      ...options, method: 'PATCH', body: { city: 'Rajshahi' },
+    }), 404, 'Address not found');
+    assertError(await request(path, { ...options, method: 'DELETE' }), 404, 'Address not found');
+  }
+  const owned = await request(`/addresses/${id}`, { token });
+  assert.equal(owned.response.status, 200);
+  assert.equal(owned.body.data.city, addressInput.city);
 });
 
 test('stock deduction rolls back order, item, movement, and prior stock changes', async () => {
