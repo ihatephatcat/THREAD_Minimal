@@ -3,6 +3,10 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { Address, Cart, CartItem, Order, OrderItem, User } from '../../database/entities';
 import { InventoryModule } from '../inventory/inventory.module';
 import { StaffModule } from '../staff/staff.module';
+import { AddressController } from './address.controller';
+import { AddressService } from './address.service';
+import { ProfileController } from './profile.controller';
+import { ProfileService } from './profile.service';
 
 @Module({
   imports: [
@@ -10,5 +14,7 @@ import { StaffModule } from '../staff/staff.module';
     StaffModule,
     InventoryModule,
   ],
+  controllers: [ProfileController, AddressController],
+  providers: [ProfileService, AddressService],
 })
 export class CustomerModule {}
