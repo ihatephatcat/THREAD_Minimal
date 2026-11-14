@@ -20,6 +20,7 @@ const {
   Address, Cart, CartItem, Category, Collection, InventoryMovement, InventoryStock,
   Order, OrderItem, Product, ProductVariant, User,
 } = require('../dist/database/entities');
+const { MovementType } = require('../dist/database/entities/inventory.entity');
 const { CatalogService } = require('../dist/modules/staff/catalog.service');
 const { InventoryService } = require('../dist/modules/inventory/inventory.service');
 const { hashPassword } = require('../dist/modules/auth/password');
@@ -92,6 +93,32 @@ function removeCartItem(variantId, token) {
   return request(`/cart/items/${variantId}`, { method: 'DELETE', token });
 }
 
+function checkout(addressId, token) {
+  return request('/checkout', { method: 'POST', body: { addressId }, token });
+}
+
+async function createBuyer(label) {
+  const { user, token } = await createActor(label);
+  const shippingAddress = { ...addressInput, line2: 'Flat 2A' };
+  const address = await insert(Address, { ...shippingAddress, userId: user.id });
+  deleteAfter.push([Order, { userId: user.id }], [InventoryMovement, { actorId: user.id }]);
+  return { user, token, address, shippingAddress };
+}
+
+async function waitForBlockedQuery(blockerPid, queryPattern) {
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    // Observe from outside the transaction so pg_stat_activity refreshes each time.
+    const [blocked] = await db.query(`
+      SELECT pid FROM pg_stat_activity
+      WHERE $1 = ANY(pg_blocking_pids(pid)) AND query LIKE $2
+    `, [blockerPid, queryPattern]);
+    if (blocked) return blocked.pid;
+    await delay(25);
+  }
+  assert.fail(`Expected a blocked PostgreSQL query matching ${queryPattern}`);
+}
+
 before(async () => {
   app = await NestFactory.create(AppModule, { logger: false, abortOnError: false });
   configureApp(app);
@@ -103,8 +130,8 @@ before(async () => {
 
 after(async () => {
   try {
-    for (const [Entity, id] of deleteAfter.reverse()) {
-      await db.getRepository(Entity).delete(id);
+    for (const [Entity, criteria] of deleteAfter.reverse()) {
+      await db.getRepository(Entity).delete(criteria);
     }
   } finally {
     await app?.close();
@@ -229,6 +256,21 @@ test('Swagger documents all cart and order operations and their response schemas
   }
 });
 
+test('Swagger documents checkout input, order response, and errors', async () => {
+  const { body: doc } = await request('/docs-json');
+  const operation = doc.paths['/api/checkout'].post;
+  assert.match(operation.summary, /cash-on-delivery/);
+  assert.deepEqual(operation.security, [{ bearer: [] }]);
+  assert.equal(operation.requestBody.content['application/json'].schema.$ref, '#/components/schemas/CheckoutDto');
+  const checkoutSchema = doc.components.schemas.CheckoutDto;
+  assert.deepEqual(checkoutSchema.required, ['addressId']);
+  assert.deepEqual(checkoutSchema.properties.addressId, { type: 'string', format: 'uuid' });
+  const created = operation.responses[201].content['application/json'].schema;
+  assert.deepEqual(created.required, ['success', 'data']);
+  assert.equal(created.properties.data.$ref, '#/components/schemas/OrderDetailDto');
+  for (const status of [400, 401, 403, 404, 409]) assert.ok(operation.responses[status]);
+});
+
 test('registration, login, authorization, and account deactivation', async () => {
   const signup = { email: email('customer'), password, name: 'Test Customer' };
   const invalid = await request('/auth/register', {
@@ -324,6 +366,7 @@ test('every customer route requires a JWT and the Customer role', async () => {
     ['DELETE', cartItemPath],
     ['GET', '/orders'],
     ['GET', `/orders/${randomUUID()}`],
+    ['POST', '/checkout', { addressId: randomUUID() }],
   ];
   for (const [method, path, body] of routes) {
     assertError(await request(path, { method, body }), 401);
@@ -604,19 +647,7 @@ test('PUT and DELETE wait behind a checkout-style cart row lock', async () => {
         });
         const [{ pid }] = await manager.query('SELECT pg_backend_pid() AS pid');
         pending = mutate();
-        const deadline = Date.now() + 5000;
-        while (Date.now() < deadline) {
-          // Observe from outside the transaction so pg_stat_activity refreshes each time.
-          const [{ blocked }] = await db.query(`
-            SELECT EXISTS (
-              SELECT 1 FROM pg_stat_activity
-              WHERE $1 = ANY(pg_blocking_pids(pid)) AND query LIKE '%FOR UPDATE%'
-            ) AS blocked
-          `, [pid]);
-          if (blocked) return;
-          await delay(25);
-        }
-        assert.fail('Cart mutation did not wait for the cart row lock');
+        await waitForBlockedQuery(pid, '%FOR UPDATE%');
       });
     } finally {
       if (pending) assert.equal((await pending).response.status, status);
@@ -702,6 +733,240 @@ test('order detail uses owned shipping and item snapshots even after catalog and
   for (const invalidId of ['invalid', '123e4567-e89b-12d3-a456-426614174000']) {
     assertError(await request(`/orders/${invalidId}`, { token }), 400);
   }
+});
+
+test('checkout places a cash-on-delivery order at current prices and preserves snapshots', async () => {
+  const { product, variants: [first, second] } = await createCatalog('checkout-success');
+  const { user, token, address, shippingAddress } = await createBuyer('checkout-success');
+  const firstStock = await insert(InventoryStock, { variantId: first.id, quantity: 5 });
+  const secondStock = await insert(InventoryStock, { variantId: second.id, quantity: 3 });
+  assert.equal((await setCartItem(first.id, 2, token)).response.status, 200);
+  const cart = await setCartItem(second.id, 1, token);
+  assert.equal(cart.response.status, 200);
+  assert.equal(cart.body.data.totalMinor, 4500);
+  await db.getRepository(ProductVariant).update(first.id, { priceMinor: 1700 });
+
+  const placed = await checkout(address.id, token);
+  assert.equal(placed.response.status, 201);
+  const { id, createdAt, items } = placed.body.data;
+  const snapshots = [
+    { ...first, quantity: 2, priceMinor: 1700 }, { ...second, quantity: 1 },
+  ].map(({ id: variantId, sku, size, color, quantity, priceMinor }) => ({
+    id: items.find((item) => item.variantId === variantId).id,
+    variantId, sku, size, color, quantity, unitPriceMinor: priceMinor, productName: product.name,
+  })).sort((left, right) => left.id.localeCompare(right.id));
+  const summary = { id, createdAt, totalMinor: 5400 };
+  assert.deepEqual(placed.body, {
+    success: true, data: { ...summary, shippingAddress, items: snapshots },
+  });
+
+  const orders = db.getRepository(Order);
+  const stored = await orders.findOneOrFail({ where: { id }, relations: { items: true } });
+  assert.equal(await orders.countBy({ userId: user.id }), 1);
+  assert.equal(stored.userId, user.id);
+  assert.equal(stored.totalMinor, summary.totalMinor);
+  assert.equal(stored.createdAt.toISOString(), createdAt);
+  assert.deepEqual(stored.shippingAddress, shippingAddress);
+  const storedItems = stored.items.map(({ orderId, createdAt: _created, updatedAt: _updated, ...item }) => {
+    assert.equal(orderId, id);
+    return item;
+  }).sort((left, right) => left.id.localeCompare(right.id));
+  assert.deepEqual(storedItems, snapshots);
+
+  const stock = db.getRepository(InventoryStock);
+  assert.equal((await stock.findOneByOrFail({ id: firstStock.id })).quantity, 3);
+  assert.equal((await stock.findOneByOrFail({ id: secondStock.id })).quantity, 2);
+  const movements = await db.getRepository(InventoryMovement).find({ where: { actorId: user.id } });
+  const actualSales = movements.map(({ variantId, type, delta, reason }) => ({ variantId, type, delta, reason }))
+    .sort((a, b) => a.variantId.localeCompare(b.variantId));
+  const expectedSales = snapshots.map(({ variantId, quantity }) => ({
+    variantId, type: MovementType.Sale, delta: -quantity, reason: `Order ${id}`,
+  })).sort((a, b) => a.variantId.localeCompare(b.variantId));
+  assert.deepEqual(actualSales, expectedSales);
+  assert.equal(await db.getRepository(CartItem).countBy({ cartId: cart.body.data.id }), 0);
+
+  await db.getRepository(Address).update(address.id, { city: 'Chattogram' });
+  await db.getRepository(Product).update(product.id, { name: 'Renamed product' });
+  await db.getRepository(ProductVariant).update(first.id, { priceMinor: 5000, color: 'green' });
+  const history = await request('/orders', { token });
+  assert.equal(history.response.status, 200);
+  assert.deepEqual(history.body, { success: true, data: [summary], meta: { page: 1, limit: 20, total: 1 } });
+  const detail = await request(`/orders/${id}`, { token });
+  assert.equal(detail.response.status, 200);
+  assert.deepEqual(detail.body, placed.body);
+});
+
+test('checkout validates the body, requires a nonempty cart, and only accepts owned addresses', async () => {
+  const { variants: [variant] } = await createCatalog('checkout-validation');
+  const { user, token, address } = await createBuyer('checkout-validation');
+  const { address: otherAddress } = await createBuyer('checkout-address-owner');
+  for (const body of [
+    {}, { addressId: 'invalid' }, { addressId: '123e4567-e89b-12d3-a456-426614174000' },
+    { addressId: address.id, totalMinor: 0 },
+  ]) {
+    assertError(await request('/checkout', { method: 'POST', body, token }), 400);
+  }
+  assertError(await checkout(address.id, token), 400, 'Cart is empty');
+  const carts = db.getRepository(Cart);
+  assert.equal(await carts.countBy({ userId: user.id }), 0);
+  const cart = await setCartItem(variant.id, 2, token);
+  assert.equal(cart.response.status, 200);
+  assertError(await checkout(otherAddress.id, token), 404, 'Address not found');
+  assertError(await checkout(randomUUID(), token), 404, 'Address not found');
+  assert.equal(await db.getRepository(CartItem).countBy({ cartId: cart.body.data.id }), 1);
+  assert.equal((await removeCartItem(variant.id, token)).response.status, 204);
+  assertError(await checkout(address.id, token), 400, 'Cart is empty');
+  assert.equal(await db.getRepository(Order).countBy({ userId: user.id }), 0);
+});
+
+test('checkout rejects inactive variants, inactive products, and missing stock', async () => {
+  const { product, variants: [variant] } = await createCatalog('checkout-unavailable');
+  const { user, token, address } = await createBuyer('checkout-unavailable');
+  const cart = await setCartItem(variant.id, 1, token);
+  assert.equal(cart.response.status, 200);
+
+  const variants = db.getRepository(ProductVariant);
+  const products = db.getRepository(Product);
+  await variants.update(variant.id, { isActive: false });
+  assertError(await checkout(address.id, token), 409, 'Cart contains an unavailable variant');
+  await variants.update(variant.id, { isActive: true });
+  await products.update(product.id, { isActive: false });
+  assertError(await checkout(address.id, token), 409, 'Cart contains an unavailable variant');
+  await products.update(product.id, { isActive: true });
+  assertError(await checkout(address.id, token), 409, 'Insufficient stock');
+  assert.equal(await db.getRepository(Order).countBy({ userId: user.id }), 0);
+  assert.equal(await db.getRepository(InventoryMovement).countBy({ actorId: user.id }), 0);
+  assert.equal(await db.getRepository(CartItem).countBy({ cartId: cart.body.data.id }), 1);
+});
+
+test('checkout rejects line and order overflow and accepts the PostgreSQL integer maximum', async () => {
+  const { variants: [first, second] } = await createCatalog('checkout-overflow');
+  const { user, token, address } = await createBuyer('checkout-overflow');
+  const variants = db.getRepository(ProductVariant);
+  const maximum = 2_147_483_647;
+  await variants.update(first.id, { priceMinor: maximum });
+  const stock = await insert(InventoryStock, { variantId: first.id, quantity: 2 });
+  await insert(InventoryStock, { variantId: second.id, quantity: 2 });
+
+  assert.equal((await setCartItem(first.id, 2, token)).response.status, 200);
+  assertError(await checkout(address.id, token), 400, 'Order total exceeds the supported range');
+  assert.equal((await setCartItem(first.id, 1, token)).response.status, 200);
+  assert.equal((await setCartItem(second.id, 1, token)).response.status, 200);
+  assertError(await checkout(address.id, token), 400, 'Order total exceeds the supported range');
+  assert.equal(await db.getRepository(Order).countBy({ userId: user.id }), 0);
+  assert.equal((await db.getRepository(InventoryStock).findOneByOrFail({ id: stock.id })).quantity, 2);
+  assert.equal(await db.getRepository(InventoryMovement).countBy({ actorId: user.id }), 0);
+  assert.equal((await request('/cart', { token })).body.data.items.length, 2);
+
+  assert.equal((await removeCartItem(second.id, token)).response.status, 204);
+  const placed = await checkout(address.id, token);
+  assert.equal(placed.response.status, 201);
+  assert.equal(placed.body.data.totalMinor, maximum);
+});
+
+test('checkout rolls back the order, items, stock, and movements when a later deduction fails', async (t) => {
+  const { variants } = await createCatalog('checkout-rollback');
+  const [first, second] = variants.sort((left, right) => left.id.localeCompare(right.id));
+  const { user, token, address } = await createBuyer('checkout-rollback');
+  const firstStock = await insert(InventoryStock, { variantId: first.id, quantity: 5 });
+  const secondStock = await insert(InventoryStock, { variantId: second.id, quantity: 1 });
+  assert.equal((await setCartItem(second.id, 2, token)).response.status, 200);
+  const cart = await setCartItem(first.id, 2, token);
+  assert.equal(cart.response.status, 200);
+  const cartItems = db.getRepository(CartItem);
+  const cartQuery = { where: { cartId: cart.body.data.id }, order: { variantId: 'ASC' } };
+  const beforeItems = await cartItems.find(cartQuery);
+
+  const inventory = app.get(InventoryService);
+  const deductStock = inventory.deductStock.bind(inventory);
+  let attemptedOrderId;
+  const observed = t.mock.method(inventory, 'deductStock', async (manager, variantId, quantity, actorId, orderId) => {
+    attemptedOrderId = orderId;
+    if (variantId === second.id) {
+      assert.equal(await manager.countBy(Order, { id: orderId }), 1);
+      assert.equal(await manager.countBy(OrderItem, { orderId }), 2);
+      assert.equal((await manager.findOneByOrFail(InventoryStock, { id: firstStock.id })).quantity, 3);
+      assert.equal(await manager.countBy(InventoryMovement, { variantId: first.id, actorId }), 1);
+    }
+    return deductStock(manager, variantId, quantity, actorId, orderId);
+  });
+
+  assertError(await checkout(address.id, token), 409, 'Insufficient stock');
+  assert.deepEqual(observed.mock.calls.map(({ arguments: args }) => args[1]), [first.id, second.id]);
+  assert.ok(attemptedOrderId);
+  assert.equal(await db.getRepository(Order).countBy({ userId: user.id }), 0);
+  assert.equal(await db.getRepository(OrderItem).countBy({ orderId: attemptedOrderId }), 0);
+  assert.equal(await db.getRepository(InventoryMovement).countBy({ actorId: user.id }), 0);
+  const stocks = db.getRepository(InventoryStock);
+  assert.equal((await stocks.findOneByOrFail({ id: firstStock.id })).quantity, 5);
+  assert.equal((await stocks.findOneByOrFail({ id: secondStock.id })).quantity, 1);
+  assert.deepEqual(await cartItems.find(cartQuery), beforeItems);
+});
+
+test('concurrent checkouts for the last unit produce one order and one deduction', async () => {
+  const { variants: [variant] } = await createCatalog('checkout-contention');
+  const buyers = [await createBuyer('checkout-race-first'), await createBuyer('checkout-race-second')];
+  await insert(InventoryStock, { variantId: variant.id, quantity: 1 });
+  for (const buyer of buyers) {
+    assert.equal((await setCartItem(variant.id, 1, buyer.token)).response.status, 200);
+  }
+  const results = await Promise.all(buyers.map(({ address, token }) => checkout(address.id, token)));
+  assert.deepEqual(results.map(({ response }) => response.status).sort(), [201, 409]);
+  const winnerIndex = results.findIndex(({ response }) => response.status === 201);
+  const winner = buyers[winnerIndex];
+  const loser = buyers[1 - winnerIndex];
+  const { id } = results[winnerIndex].body.data;
+  assertError(results[1 - winnerIndex], 409, 'Insufficient stock');
+
+  const orders = db.getRepository(Order);
+  assert.equal(await orders.countBy({ userId: winner.user.id }), 1);
+  assert.equal(await orders.countBy({ userId: loser.user.id }), 0);
+  assert.equal(await db.getRepository(OrderItem).countBy({ variantId: variant.id }), 1);
+  const stock = await db.getRepository(InventoryStock).findOneByOrFail({ variantId: variant.id });
+  assert.equal(stock.quantity, 0);
+  const movements = await db.getRepository(InventoryMovement).findBy({ variantId: variant.id });
+  assert.equal(movements.length, 1);
+  assert.equal(movements[0].actorId, winner.user.id);
+  assert.equal(movements[0].delta, -1);
+  assert.equal(movements[0].reason, `Order ${id}`);
+  assert.deepEqual((await request('/cart', { token: winner.token })).body.data.items, []);
+  assert.equal((await request('/cart', { token: loser.token })).body.data.items[0].quantity, 1);
+});
+
+test('a cart PUT waits for checkout and survives checkout cart cleanup', async () => {
+  const { variants: [variant] } = await createCatalog('checkout-cart-lock');
+  const { token, address } = await createBuyer('checkout-cart-lock');
+  await insert(InventoryStock, { variantId: variant.id, quantity: 5 });
+  const cart = await setCartItem(variant.id, 2, token);
+  assert.equal(cart.response.status, 200);
+
+  let pendingCheckout;
+  let pendingPut;
+  try {
+    await db.transaction(async (manager) => {
+      await manager.getRepository(InventoryStock).findOneOrFail({
+        where: { variantId: variant.id }, lock: { mode: 'pessimistic_write' },
+      });
+      const [{ pid }] = await manager.query('SELECT pg_backend_pid() AS pid');
+      pendingCheckout = checkout(address.id, token);
+      const checkoutPid = await waitForBlockedQuery(pid, 'UPDATE "inventory_stock"%');
+      pendingPut = setCartItem(variant.id, 4, token);
+      await waitForBlockedQuery(checkoutPid, '%FROM "carts"%FOR UPDATE%');
+    });
+  } finally {
+    await Promise.all([pendingCheckout, pendingPut]);
+  }
+
+  const placed = await pendingCheckout;
+  assert.equal(placed.response.status, 201);
+  assert.equal(placed.body.data.items[0].quantity, 2);
+  const put = await pendingPut;
+  assert.equal(put.response.status, 200);
+  const [item] = await db.getRepository(CartItem).findBy({ cartId: cart.body.data.id });
+  assert.equal(item.variantId, variant.id);
+  assert.equal(item.quantity, 4);
+  const stock = await db.getRepository(InventoryStock).findOneByOrFail({ variantId: variant.id });
+  assert.equal(stock.quantity, 3);
 });
 
 test('stock deduction rolls back order, item, movement, and prior stock changes', async () => {
