@@ -1,4 +1,5 @@
 import { ApiProperty } from '@nestjs/swagger';
+import type { Order } from '../../database/entities';
 import type { ShippingAddress } from '../../database/entities/address.entity';
 import { CreateAddressDto } from './customer.dto';
 
@@ -50,4 +51,16 @@ export class OrderDetailDto extends OrderSummaryDto {
 
   @ApiProperty({ type: () => OrderItemResponseDto, isArray: true })
   items!: OrderItemResponseDto[];
+}
+
+export function toOrderDetail(order: Order): OrderDetailDto {
+  return {
+    id: order.id,
+    createdAt: order.createdAt,
+    totalMinor: order.totalMinor,
+    shippingAddress: order.shippingAddress,
+    items: order.items.map(({ id, variantId, sku, productName, size, color, quantity, unitPriceMinor }) => ({
+      id, variantId, sku, productName, size, color, quantity, unitPriceMinor,
+    })),
+  };
 }

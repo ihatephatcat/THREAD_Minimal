@@ -3,7 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Page, type PageQueryDto } from '../../common/http/pagination';
 import { Order } from '../../database/entities';
-import type { OrderDetailDto, OrderSummaryDto } from './order-history.dto';
+import { toOrderDetail, type OrderDetailDto, type OrderSummaryDto } from './order-history.dto';
 
 @Injectable()
 export class OrderHistoryService {
@@ -28,22 +28,6 @@ export class OrderHistoryService {
     });
     if (!order) throw new NotFoundException('Order not found');
 
-    const items = order.items.map((item) => ({
-      id: item.id,
-      variantId: item.variantId,
-      sku: item.sku,
-      productName: item.productName,
-      size: item.size,
-      color: item.color,
-      quantity: item.quantity,
-      unitPriceMinor: item.unitPriceMinor,
-    }));
-    return {
-      id: order.id,
-      createdAt: order.createdAt,
-      totalMinor: order.totalMinor,
-      shippingAddress: order.shippingAddress,
-      items,
-    };
+    return toOrderDetail(order);
   }
 }

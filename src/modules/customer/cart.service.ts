@@ -47,8 +47,8 @@ export class CartService {
     });
   }
 
-  private lockCart(manager: EntityManager, userId: string): Promise<Cart | null> {
-    // Checkout takes this same row lock before it reads the cart items.
+  lockCart(manager: EntityManager, userId: string): Promise<Cart | null> {
+    // Cart mutations and checkout take this lock before accessing the items.
     return manager.getRepository(Cart).findOne({ where: { userId }, lock: { mode: 'pessimistic_write' } });
   }
 
