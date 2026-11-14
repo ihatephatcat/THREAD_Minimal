@@ -7,7 +7,7 @@ const { validateAppEnvironment } = require('../dist/config/environment');
 const { RegisterDto } = require('../dist/modules/auth/auth.dto');
 const { hashPassword, verifyPassword } = require('../dist/modules/auth/password');
 const {
-  CreateAddressDto, UpdateAddressDto, UpdateProfileDto,
+  CreateAddressDto, SetCartItemDto, UpdateAddressDto, UpdateProfileDto,
 } = require('../dist/modules/customer/customer.dto');
 const { Page, PageQueryDto } = require('../dist/common/http/pagination');
 
@@ -63,6 +63,15 @@ test('pagination converts query values, caps page size, and keeps total', async 
   const query = await transform(PageQueryDto, { page: '2', limit: '10' }, 'query');
   assert.deepEqual(new Page(['a'], 15, query).meta, { page: 2, limit: 10, total: 15 });
   await assert.rejects(transform(PageQueryDto, { limit: '101' }, 'query'));
+});
+
+test('cart quantity accepts integers from 1 to 1000 without coercing strings', async () => {
+  for (const quantity of [1, 1000]) {
+    assert.equal((await transform(SetCartItemDto, { quantity })).quantity, quantity);
+  }
+  for (const quantity of [0, -1, 1.5, '2', 1001, null, undefined]) {
+    await assert.rejects(transform(SetCartItemDto, { quantity }));
+  }
 });
 
 test('bcrypt hashes passwords and rejects input beyond its UTF-8 limit', async () => {
