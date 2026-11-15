@@ -1,6 +1,6 @@
 # Minimal THREAD API Contract
 
-All application routes use the `/api` prefix. Run the starter and open `/api/docs` to try the live routes. This contract also lists the routes planned for domain implementation.
+All application routes use the `/api` prefix. Open `/api/docs` on the running app to try the live starter and Customer routes. This contract also lists planned routes for the other domains.
 
 ## Live starter routes
 
@@ -16,7 +16,7 @@ Send `Authorization: Bearer <accessToken>` on protected routes. Request DTOs rej
 
 The interceptor wraps successes as `{ "success": true, "data": ... }`. Lists use a `meta` object with `page`, `limit`, and `total`. Successful 204 responses have an empty body. Errors use `{ "success": false, "statusCode": 400, "message": [...], "requestId": "..." }`. The `message` may be a string, and the `X-Request-Id` header matches the response ID. Use 400 for invalid input, 401 for missing or invalid authentication, 403 for a disallowed role, 404 for an unknown or unowned resource, and 409 for duplicate data, stock conflicts, or restricted deletes.
 
-## Customer routes to implement
+## Live Customer routes
 
 All these routes require Customer. Use the logged-in user's ID for repository filters. Address fields are defined by `CreateAddressDto`. For patch requests accept a subset of fields. Catalog prices and quantities shown in the cart are informational until checkout.
 
@@ -37,6 +37,8 @@ All these routes require Customer. Use the logged-in user's ID for repository fi
 | GET | `/api/orders/:id` | Owned order with item and shipping snapshots | 200 |
 
 Cart quantity is an integer from 1 to 1,000. Checkout uses current catalog prices, returns 409 for inactive cart variants, and uses the transaction defined in the specification. A cart edit performs no stock write.
+
+Checkout responses include `X-Response-Time` in milliseconds when the request reaches the route interceptor. See the [Customer viva and demo guide](CUSTOMER_VIVA.md) for the checkout flow and verification steps.
 
 ## Staff catalog routes to implement
 

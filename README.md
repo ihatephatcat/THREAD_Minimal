@@ -1,6 +1,6 @@
 # Minimal THREAD
 
-Minimal THREAD is a NestJS and PostgreSQL starter for the CSC4161 e-commerce backend. It runs with health, registration, login, authenticated identity, and an Admin-only access check. The four domain modules are ready for their owners to implement the business endpoints listed in the [API contract](docs/API_CONTRACT.md).
+Minimal THREAD is a NestJS and PostgreSQL starter for the CSC4161 e-commerce backend. It runs with health, registration, login, authenticated identity, an Admin-only access check, and the Customer routes in the [API contract](docs/API_CONTRACT.md). See the [Customer viva and demo guide](docs/CUSTOMER_VIVA.md) for the Customer features.
 
 ## Run locally
 
@@ -39,6 +39,8 @@ Use Node.js 22 or newer, npm, and PostgreSQL. The optional Docker Compose servic
    During development, use `npm run start:dev` for automatic restarts.
 
 Open [Swagger UI](http://127.0.0.1:3000/api/docs). Run **GET /api/health** first. Register a customer in **POST /api/auth/register**, copy `data.accessToken`, and paste it in **Authorize**. Try **GET /api/auth/me** and **GET /api/admin/access**. The customer receives 403 on the Admin route and 401 on protected routes without a token.
+
+To run Minimal THREAD alongside Current THREAD on port 3000, set `PORT=3001` in Minimal THREAD's local `.env` and use Swagger at `http://127.0.0.1:3001/api/docs`. Point `DB_*` at a separate Minimal THREAD database.
 
 To try the Admin route, set `ADMIN_EMAIL` and `ADMIN_PASSWORD` in `.env` and run `npm run seed:admin` after migrating. Use a distinct email from the customer account. The seed can be rerun and preserves an existing active Admin and its password. Login through the same Swagger login route and authorize with the returned Admin token.
 

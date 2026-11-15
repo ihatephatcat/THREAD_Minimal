@@ -83,7 +83,7 @@ The starter includes Swagger with bearer authentication, versioned migrations, v
 
 ## Milestones
 
-- Customer works through profile and addresses, then cart and order history, then transactional checkout and integration tests.
+- Customer has implemented profile, addresses, cart, order history, and transactional checkout with PostgreSQL tests. The [Customer viva and demo guide](CUSTOMER_VIVA.md) covers these routes, request logging, and checkout timing.
 - Staff implements the four CRUD resources, then checks catalog visibility and deletion behavior.
 - Inventory implements stock and movement reads, then stock receipts and adjustments with transaction tests.
 - Admin implements staff account listing, creation, role updates between staff roles, and activation changes, then verifies the complete role matrix.
