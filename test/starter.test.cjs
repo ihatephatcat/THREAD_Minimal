@@ -1,8 +1,9 @@
 const assert = require('node:assert/strict');
+const { EventEmitter } = require('node:events');
 const test = require('node:test');
 require('reflect-metadata');
 
-const { ValidationPipe } = require('@nestjs/common');
+const { Logger, ValidationPipe } = require('@nestjs/common');
 const { validateAppEnvironment } = require('../dist/config/environment');
 const { RegisterDto } = require('../dist/modules/auth/auth.dto');
 const { hashPassword, verifyPassword } = require('../dist/modules/auth/password');
@@ -10,6 +11,7 @@ const {
   CreateAddressDto, SetCartItemDto, UpdateAddressDto, UpdateProfileDto,
 } = require('../dist/modules/customer/customer.dto');
 const { Page, PageQueryDto } = require('../dist/common/http/pagination');
+const { requestLogging } = require('../dist/common/http/request-logging');
 
 const env = {
   DB_NAME: 'minimal_thread_test',
@@ -22,6 +24,27 @@ const pipe = new ValidationPipe({
 });
 
 const transform = (metatype, data, type = 'body') => pipe.transform(data, { metatype, type });
+
+test('request logging emits one entry only after the response finishes', (t) => {
+  const log = t.mock.method(Logger.prototype, 'log', () => {});
+  const request = { method: 'DELETE', requestId: 'existing-request-id' };
+  const response = new EventEmitter();
+
+  let continued = false;
+  requestLogging(request, response, () => { continued = true; });
+  assert.equal(continued, true);
+  assert.equal(log.mock.callCount(), 0);
+
+  request.route = { path: '/api/addresses/:id' };
+  response.statusCode = 204;
+  response.emit('finish');
+  response.emit('finish');
+  assert.equal(log.mock.callCount(), 1);
+  assert.match(
+    log.mock.calls[0].arguments[0],
+    /^DELETE \/api\/addresses\/:id 204 \d+\.\d{2}ms requestId=existing-request-id$/,
+  );
+});
 
 test('validates and converts environment variables', () => {
   const values = validateAppEnvironment({ ...env, PORT: '3010', JWT_TTL_SECONDS: '600' });

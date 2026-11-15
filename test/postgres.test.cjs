@@ -11,6 +11,7 @@ if (!testDatabase || testDatabase === process.env.DB_NAME) {
 }
 process.env.DB_NAME = testDatabase;
 
+const { Logger } = require('@nestjs/common');
 const { NestFactory } = require('@nestjs/core');
 const { JwtService } = require('@nestjs/jwt');
 const { DataSource } = require('typeorm');
@@ -152,6 +153,43 @@ test('health and Swagger expose the runnable starter', async () => {
   assert.deepEqual(doc.body.paths['/api/admin/access'].get.security, [{ bearer: [] }]);
 });
 
+test('HTTP logging uses final statuses and request IDs without recording input', async (t) => {
+  const { token } = await createActor('request-logging');
+  const log = t.mock.method(Logger.prototype, 'log', () => {});
+  const health = await request('/health?secret=private-query');
+  const invalid = await request('/addresses/private-path?secret=private-query', {
+    method: 'PATCH', body: { line1: 'private-body' }, token,
+  });
+  const missing = await request('/unknown/private-path');
+  assert.equal(health.response.status, 200);
+  assertError(invalid, 400);
+  assertError(missing, 404);
+
+  const messages = log.mock.calls
+    .filter(({ this: logger }) => logger.context === 'HTTP')
+    .map(({ arguments: [message] }) => message);
+  assert.equal(messages.length, 3);
+  const duration = /^\d+\.\d{2}ms$/;
+  for (const [result, method, path] of [
+    [health, 'GET', '/api/health'],
+    [invalid, 'PATCH', '/api/addresses/:id'],
+    [missing, 'GET', '[unmatched]'],
+  ]) {
+    const requestId = result.response.headers.get('x-request-id');
+    assert.ok(requestId);
+    const matches = messages.filter((message) => message.endsWith(`requestId=${requestId}`));
+    assert.equal(matches.length, 1);
+    const [loggedMethod, loggedPath, status, elapsed, id, ...rest] = matches[0].split(' ');
+    assert.deepEqual([loggedMethod, loggedPath, status], [method, path, String(result.response.status)]);
+    assert.match(elapsed, duration);
+    assert.equal(id, `requestId=${requestId}`);
+    assert.deepEqual(rest, []);
+  }
+  for (const value of ['private-query', 'private-path', 'private-body', token]) {
+    assert.ok(messages.every((message) => !message.includes(value)));
+  }
+});
+
 test('Swagger documents customer routes, validation, and pagination', async () => {
   const { body: doc } = await request('/docs-json');
   const routes = [
@@ -268,6 +306,9 @@ test('Swagger documents checkout input, order response, and errors', async () =>
   const created = operation.responses[201].content['application/json'].schema;
   assert.deepEqual(created.required, ['success', 'data']);
   assert.equal(created.properties.data.$ref, '#/components/schemas/OrderDetailDto');
+  assert.deepEqual(operation.responses[201].headers['X-Response-Time'].schema, {
+    type: 'string', example: '12.34ms',
+  });
   for (const status of [400, 401, 403, 404, 409]) assert.ok(operation.responses[status]);
 });
 
@@ -748,6 +789,7 @@ test('checkout places a cash-on-delivery order at current prices and preserves s
 
   const placed = await checkout(address.id, token);
   assert.equal(placed.response.status, 201);
+  assert.match(placed.response.headers.get('x-response-time'), /^\d+\.\d{2}ms$/);
   const { id, createdAt, items } = placed.body.data;
   const snapshots = [
     { ...first, quantity: 2, priceMinor: 1700 }, { ...second, quantity: 1 },
@@ -790,6 +832,7 @@ test('checkout places a cash-on-delivery order at current prices and preserves s
   await db.getRepository(ProductVariant).update(first.id, { priceMinor: 5000, color: 'green' });
   const history = await request('/orders', { token });
   assert.equal(history.response.status, 200);
+  assert.equal(history.response.headers.get('x-response-time'), null);
   assert.deepEqual(history.body, { success: true, data: [summary], meta: { page: 1, limit: 20, total: 1 } });
   const detail = await request(`/orders/${id}`, { token });
   assert.equal(detail.response.status, 200);
@@ -806,7 +849,12 @@ test('checkout validates the body, requires a nonempty cart, and only accepts ow
   ]) {
     assertError(await request('/checkout', { method: 'POST', body, token }), 400);
   }
-  assertError(await checkout(address.id, token), 400, 'Cart is empty');
+  const denied = await checkout(address.id);
+  assertError(denied, 401);
+  assert.equal(denied.response.headers.get('x-response-time'), null);
+  const empty = await checkout(address.id, token);
+  assertError(empty, 400, 'Cart is empty');
+  assert.match(empty.response.headers.get('x-response-time'), /^\d+\.\d{2}ms$/);
   const carts = db.getRepository(Cart);
   assert.equal(await carts.countBy({ userId: user.id }), 0);
   const cart = await setCartItem(variant.id, 2, token);
