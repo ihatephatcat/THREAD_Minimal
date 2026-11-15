@@ -6,6 +6,8 @@ The request travels through a controller, a service, a TypeORM repository, and P
 
 [CustomerModule](../src/modules/customer/customer.module.ts) registers the five controllers and services. It imports the shared TypeORM repositories and the existing Staff and Inventory modules.
 
+In the supplied lecture ZIP, `nestJs Tutorial/sample-proj/src/users/users.module.ts` registers a repository and exports `UsersService` for injection into `CarsService`. Checkout uses the same module and constructor injection pattern with Catalog and Inventory. See the [lecture alignment report](CUSTOMER_LECTURE_ALIGNMENT.md) for file-by-file comparisons and viva prompts.
+
 ## Features
 
 All paths below use the `/api` prefix and require a JWT for the `customer` role.
@@ -44,6 +46,8 @@ The order is placed for cash on delivery. Its address, SKU, product name, size, 
 | Checkout timing interceptor | [checkout-timing.interceptor.ts](../src/modules/customer/checkout-timing.interceptor.ts) surrounds Checkout execution after the guards. It measures with `performance.now()` and sets `X-Response-Time` in milliseconds when execution completes or errors. The existing response body still comes from the shared interceptor or exception filter. |
 
 Middleware runs across HTTP requests and can observe the completed response. The timing interceptor attaches to one Nest handler and observes its execution before Nest sends the response.
+
+The lecture file `nestJs Tutorial/sample-proj/src/users/users.controller.ts` uses `@UseInterceptors(FileInterceptor(...))` on the profile-picture route. The same decorator attaches the timing interceptor to Checkout.
 
 The starter supplied authentication and RBAC, decorators, request IDs, environment validation, shared entities and migrations, DTO validation infrastructure, the global response interceptor and error filter, and the catalog and inventory service contracts. Customer used these components and added the routes, checkout orchestration, request logging, and checkout timing.
 
