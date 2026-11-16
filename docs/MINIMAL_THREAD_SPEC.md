@@ -17,6 +17,8 @@ Minimal THREAD is a single-brand fashion e-commerce REST API using NestJS, TypeS
 
 Roles are explicit and non-hierarchical. The Admin route checks the Admin role. Staff routes allow Staff and Admin. Inventory routes allow Inventory Manager and Admin. Registration always creates a Customer, and privileged users use the same login endpoint. The bootstrap command creates the initial Admin. Deactivating a user invalidates access on the next authenticated request because the guard loads the current active account.
 
+Admin manages Staff and Inventory Manager accounts through the shared `users` table. Accounts start active, and role changes stay within the two managed roles. DELETE sets `isActive` to false and retains the user row so Inventory movement attribution continues to resolve.
+
 ## Canonical PostgreSQL schema
 
 The TypeORM entities and initial migration are authoritative. Entity rows use UUID primary keys and `createdAt` and `updatedAt` timestamps. The many-to-many junction uses a composite primary key. Store money in BDT poisha as nonnegative integers. Validate line totals and the order total against the PostgreSQL integer limit of 2,147,483,647 before persisting.
@@ -86,6 +88,6 @@ The starter includes Swagger with bearer authentication, versioned migrations, v
 - Customer has implemented profile, addresses, cart, order history, and transactional checkout with PostgreSQL tests. The [Customer viva and demo guide](CUSTOMER_VIVA.md) covers these routes, request logging, and checkout timing.
 - Staff has implemented the four CRUD resources and public product browsing, with catalog visibility, deletion rollback, and checkout integration tests. See the [Staff viva guide](STAFF_VIVA.md).
 - Inventory has implemented stock and movement reads, receipts, and adjustments with concurrency and rollback tests. See the [Inventory viva guide](INVENTORY_VIVA.md).
-- Admin implements staff account listing, creation, role updates between staff roles, and activation changes, then verifies the complete role matrix.
+- Admin has implemented managed account creation, listing, updates, and deactivation, with role matrix and Inventory attribution tests. See the [Admin viva guide](ADMIN_VIVA.md).
 
 Use the [API contract](API_CONTRACT.md) to implement the routes and review the end-to-end behavior.

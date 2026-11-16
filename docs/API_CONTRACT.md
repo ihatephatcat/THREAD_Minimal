@@ -1,6 +1,6 @@
 # Minimal THREAD API Contract
 
-All application routes use the `/api` prefix. Open `/api/docs` on the running app to try the live starter, Customer, Inventory, Staff, and Public Catalog routes. This contract also lists planned Admin management routes.
+All application routes use the `/api` prefix. Open `/api/docs` on the running app to try the starter, Customer, Inventory, Staff, Public Catalog, and Admin routes.
 
 ## Live starter routes
 
@@ -79,15 +79,16 @@ All these routes require the Inventory Manager or Admin role. Movements record t
 
 Detail and mutation routes return 404 for an unknown variant. Mutations return 409 when the result would be negative or exceed the PostgreSQL integer limit. A variant without a stock row has quantity zero. An increase can establish that row. A successful receipt or adjustment returns the updated balance and its movement. Movement history includes checkout sales.
 
-## Admin routes to implement
+## Live Admin routes
 
-All these routes require Admin. A staff account must have role `staff` or `inventory_manager`. The management API acts only on staff accounts and returns public fields with `isActive`.
+All these routes require an active Admin. The management API acts only on `staff` and `inventory_manager` accounts and returns `id`, `name`, `email`, `role`, `isActive`, `createdAt`, and `updatedAt`. `GET /api/admin/access` also remains available for checking the signed-in Admin's access.
 
 | Method | Path | Body or result | Success |
 | --- | --- | --- | --- |
-| GET | `/api/admin/staff` | Paginated staff and inventory accounts | 200 |
+| GET | `/api/admin/staff` | Paginated active and inactive managed accounts, sorted by name then ID. Optional `role` and `isActive` filters. | 200 |
 | GET | `/api/admin/staff/:id` | Staff account detail | 200 |
-| POST | `/api/admin/staff` | `{ email, name, password, role }` | 201 |
-| PATCH | `/api/admin/staff/:id` | Subset of `{ name, role, isActive }` | 200 |
+| POST | `/api/admin/staff` | `{ email, name, password, role }`. Creates an active managed account. | 201 |
+| PATCH | `/api/admin/staff/:id` | Subset of `{ name, email, role, isActive }` | 200 |
+| DELETE | `/api/admin/staff/:id` | Set `isActive` to false. Repeated deactivation also succeeds. | 204 |
 
-Apply staff account deactivation through `isActive` so inventory movement attribution is retained. Return 404 for an ID outside the staff account set. Store passwords with the shared bcrypt helper and project responses to their public fields.
+Deactivation retains the employee ID and inventory movement attribution. Login and previously issued tokens are rejected while the account is inactive. Admin can reactivate a managed account through PATCH. Missing or unmanaged IDs return 404. Creation and email changes use existing email normalization and return 409 for a duplicate email. Creation uses the shared bcrypt helper, and management responses exclude password hashes.
