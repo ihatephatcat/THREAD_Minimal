@@ -1076,3 +1076,227 @@ test('stock deduction rolls back order, item, movement, and prior stock changes'
   assert.equal(stock.quantity, 2);
   assert.equal(await db.getRepository(CartItem).countBy({ id: cartItem.id }), 1);
 });
+
+const inventoryPath = '/inventory';
+const inventoryPost = (resource, body, token) =>
+  request(`${inventoryPath}/${resource}`, { method: 'POST', body, token });
+
+function cleanInventory(variantId) {
+  deleteAfter.push([InventoryStock, { variantId }], [InventoryMovement, { variantId }]);
+}
+
+test('Inventory Swagger describes all operations and request bodies', async () => {
+  const { response, body: doc } = await request('/docs-json');
+  assert.equal(response.status, 200);
+  for (const [path, method, success] of [
+    ['/api/inventory/stock', 'get', 200],
+    ['/api/inventory/stock/{variantId}', 'get', 200],
+    ['/api/inventory/receipts', 'post', 201],
+    ['/api/inventory/adjustments', 'post', 201],
+    ['/api/inventory/movements', 'get', 200],
+  ]) {
+    const operation = doc.paths[path][method];
+    assert.deepEqual(operation.tags, ['Inventory']);
+    assert.deepEqual(operation.security, [{ bearer: [] }]);
+    for (const status of [success, 400, 401, 403]) assert.ok(operation.responses[status]);
+  }
+  for (const [route, model, amount, example] of [
+    ['receipts', 'ReceiveStockDto', 'quantity', 10],
+    ['adjustments', 'AdjustStockDto', 'delta', -2],
+  ]) {
+    const post = doc.paths[`/api/inventory/${route}`].post;
+    assert.equal(post.requestBody.content['application/json'].schema.$ref, `#/components/schemas/${model}`);
+    const schema = doc.components.schemas[model];
+    assert.deepEqual([...schema.required].sort(), [amount, 'reason', 'variantId'].sort());
+    assert.equal(schema.properties[amount].example, example);
+    assert.ok(post.responses[404]);
+    assert.ok(post.responses[409]);
+  }
+  for (const route of ['stock', 'movements']) {
+    const { parameters } = doc.paths[`/api/inventory/${route}`].get;
+    assert.equal(parameters.find(({ name }) => name === 'variantId').schema.format, 'uuid');
+    assert.equal(parameters.find(({ name }) => name === 'limit').schema.maximum, 100);
+  }
+});
+
+test('Inventory endpoints allow Admin and reject missing tokens, Customer, and Staff', async () => {
+  const { token: customer } = await createActor('inventory-denied-customer');
+  const { token: staff } = await createActor('inventory-denied-staff', Role.Staff);
+  const { token: admin } = await createActor('inventory-allowed-admin', Role.Admin);
+  const missing = randomUUID();
+  for (const [path, method, body, adminStatus] of [
+    ['/stock', 'GET', undefined, 200],
+    [`/stock/${missing}`, 'GET', undefined, 404],
+    ['/receipts', 'POST', { variantId: missing, quantity: 1, reason: 'Delivery' }, 404],
+    ['/adjustments', 'POST', { variantId: missing, delta: -1, reason: 'Damage' }, 404],
+    ['/movements', 'GET', undefined, 200],
+  ]) {
+    const send = (token) => request(inventoryPath + path, { method, body, token });
+    assertError(await send(), 401);
+    assertError(await send(customer), 403);
+    assertError(await send(staff), 403);
+    assert.equal((await send(admin)).response.status, adminStatus);
+  }
+});
+
+test('Inventory stock reads include variant details and treat missing balances as zero', async () => {
+  const { product, variants: [first, second] } = await createCatalog('inventory-stock');
+  const { token } = await createActor('inventory-stock', Role.InventoryManager);
+  await insert(InventoryStock, { variantId: second.id, quantity: 4 });
+  const detail = await request(`${inventoryPath}/stock/${first.id}`, { token });
+  const expected = {
+    variantId: first.id, productId: product.id, sku: first.sku, productName: product.name,
+    size: first.size, color: first.color, quantity: 0,
+  };
+  assert.equal(detail.response.status, 200);
+  assert.deepEqual(detail.body.data, expected);
+  assert.equal(await db.getRepository(InventoryStock).countBy({ variantId: first.id }), 0);
+
+  const all = await request(`${inventoryPath}/stock?limit=100`, { token });
+  assert.equal(all.response.status, 200);
+  const skus = all.body.data.map(({ sku }) => sku);
+  assert.deepEqual(skus, [...skus].sort());
+  assert.equal(all.body.data.find(({ variantId }) => variantId === second.id).quantity, 4);
+  const filtered = `${inventoryPath}/stock?variantId=${first.id}&limit=1`;
+  const firstPage = await request(filtered, { token });
+  assert.deepEqual(firstPage.body, { success: true, data: [expected], meta: { page: 1, limit: 1, total: 1 } });
+  const secondPage = await request(filtered + '&page=2', { token });
+  assert.deepEqual(secondPage.body, { success: true, data: [], meta: { page: 2, limit: 1, total: 1 } });
+});
+
+test('Inventory receipts and signed adjustments persist stock and attributable movements', async () => {
+  const { variants: [first, second] } = await createCatalog('inventory-change');
+  const { user, token } = await createActor('inventory-change', Role.InventoryManager);
+  const { user: admin, token: adminToken } = await createActor('inventory-receive-admin', Role.Admin);
+  cleanInventory(first.id);
+  cleanInventory(second.id);
+
+  for (const [resource, fields, actorId, bearer, quantity, type, delta] of [
+    ['receipts', { quantity: 10 }, user.id, token, 10, MovementType.Receipt, 10],
+    ['receipts', { quantity: 2 }, admin.id, adminToken, 12, MovementType.Receipt, 2],
+    ['adjustments', { delta: 3 }, user.id, token, 15, MovementType.Adjustment, 3],
+    ['adjustments', { delta: -4 }, user.id, token, 11, MovementType.Adjustment, -4],
+  ]) {
+    const changed = await inventoryPost(resource, { ...fields, variantId: first.id, reason: '  Count update  ' }, bearer);
+    assert.equal(changed.response.status, 201);
+    assert.equal(changed.body.success, true);
+    const { movement, ...balance } = changed.body.data;
+    assert.deepEqual(balance, { variantId: first.id, quantity });
+    const { id, createdAt } = movement;
+    assert.ok(id);
+    assert.ok(Number.isFinite(Date.parse(createdAt)));
+    assert.deepEqual(movement, { id, createdAt, variantId: first.id, actorId, type, delta, reason: 'Count update' });
+    const persisted = await db.getRepository(InventoryMovement).findOneByOrFail({ id });
+    assert.equal(persisted.type, type);
+    assert.equal(persisted.delta, delta);
+    assert.equal(persisted.actorId, actorId);
+    const stock = await db.getRepository(InventoryStock).findOneByOrFail({ variantId: first.id });
+    assert.equal(stock.quantity, quantity);
+  }
+
+  assertError(await inventoryPost('adjustments', { variantId: first.id, delta: -12, reason: 'Damage' }, token),
+    409, 'Adjustment would make stock negative');
+  assertError(await inventoryPost('adjustments', { variantId: second.id, delta: -1, reason: 'Damage' }, token),
+    409, 'Adjustment would make stock negative');
+  assert.equal(await db.getRepository(InventoryMovement).countBy({ variantId: first.id }), 4);
+  assert.equal(await db.getRepository(InventoryStock).countBy({ variantId: second.id }), 0);
+  const createdByAdjustment = await inventoryPost('adjustments', { variantId: second.id, delta: 1, reason: 'Correction' }, token);
+  assert.equal(createdByAdjustment.response.status, 201);
+  assert.equal(createdByAdjustment.body.data.quantity, 1);
+});
+
+test('Inventory rejects invalid quantities, reasons, UUIDs, unknown variants, and overflow', async () => {
+  const { variants: [variant] } = await createCatalog('inventory-validation');
+  const { token } = await createActor('inventory-validation', Role.InventoryManager);
+  const good = { variantId: variant.id, reason: 'Delivery' };
+  await insert(InventoryStock, { variantId: variant.id, quantity: 2_147_483_647 });
+  for (const quantity of [0, -1, 0.5, '1', 2_147_483_648]) {
+    assertError(await inventoryPost('receipts', { ...good, quantity }, token), 400);
+  }
+  for (const delta of [0, 0.5, '-1', -2_147_483_649, 2_147_483_648]) {
+    assertError(await inventoryPost('adjustments', { ...good, delta }, token), 400);
+  }
+  for (const reason of [undefined, ' ', 'a'.repeat(241), 'hello\u0000world']) {
+    const invalid = await inventoryPost('receipts', { ...good, quantity: 1, reason }, token);
+    assertError(invalid, 400);
+    assert.ok(invalid.body.message.some((message) => message.includes('reason')));
+  }
+  assertError(await inventoryPost('receipts', { ...good, variantId: 'bad', quantity: 1 }, token), 400);
+  assertError(await request(`${inventoryPath}/stock/bad`, { token }), 400);
+  assertError(await request(`${inventoryPath}/movements?variantId=bad`, { token }), 400);
+  assertError(await request(`${inventoryPath}/stock?limit=101`, { token }), 400);
+  assertError(await request(`${inventoryPath}/stock/${randomUUID()}`, { token }), 404, 'Variant not found');
+  assertError(await inventoryPost('receipts', { ...good, variantId: randomUUID(), quantity: 1 }, token), 404, 'Variant not found');
+  assertError(await inventoryPost('receipts', { ...good, quantity: 1 }, token), 409, 'Stock limit exceeded');
+  assertError(await inventoryPost('adjustments', { ...good, delta: -2_147_483_648 }, token),
+    409, 'Adjustment would make stock negative');
+  assert.equal(await db.getRepository(InventoryMovement).countBy({ variantId: variant.id }), 0);
+  assert.equal((await db.getRepository(InventoryStock).findOneByOrFail({ variantId: variant.id })).quantity,
+    2_147_483_647);
+});
+
+test('concurrent first receipts and decreases share one balance without losing stock updates', async () => {
+  const { variants: [variant] } = await createCatalog('inventory-concurrent');
+  const { token } = await createActor('inventory-concurrent', Role.InventoryManager);
+  cleanInventory(variant.id);
+  const payload = { variantId: variant.id, reason: 'Concurrent stock check' };
+  const receipts = await Promise.all([4, 3].map((quantity) =>
+    inventoryPost('receipts', { ...payload, quantity }, token)));
+  assert.deepEqual(receipts.map(({ response }) => response.status), [201, 201]);
+  const stock = db.getRepository(InventoryStock);
+  assert.equal(await stock.countBy({ variantId: variant.id }), 1);
+  assert.equal((await stock.findOneByOrFail({ variantId: variant.id })).quantity, 7);
+  const decreases = await Promise.all([1, 2].map(() =>
+    inventoryPost('adjustments', { ...payload, delta: -5 }, token)));
+  assert.deepEqual(decreases.map(({ response }) => response.status).sort(), [201, 409]);
+  assert.equal((await stock.findOneByOrFail({ variantId: variant.id })).quantity, 2);
+  assert.equal(await db.getRepository(InventoryMovement).countBy({ variantId: variant.id }), 3);
+});
+
+test('failed Inventory movement inserts roll back existing and newly created stock balances', async () => {
+  const { variants: [first, second] } = await createCatalog('inventory-rollback');
+  const stock = db.getRepository(InventoryStock);
+  await insert(InventoryStock, { variantId: first.id, quantity: 7 });
+  const inventory = app.get(InventoryService);
+  // An invalid actor fails the real movement FK after the balance has already been written.
+  for (const variant of [first, second]) {
+    await assert.rejects(
+      inventory.receive({ variantId: variant.id, quantity: 4, reason: 'Rollback check' }, randomUUID()),
+      { code: '23503' },
+    );
+    assert.equal(await db.getRepository(InventoryMovement).countBy({ variantId: variant.id }), 0);
+  }
+  assert.equal((await stock.findOneByOrFail({ variantId: first.id })).quantity, 7);
+  assert.equal(await stock.countBy({ variantId: second.id }), 0);
+});
+
+test('Inventory movement pagination includes Customer checkout sales with the order reference', async () => {
+  const { variants: [variant, other] } = await createCatalog('inventory-history');
+  const { token } = await createActor('inventory-history', Role.InventoryManager);
+  const buyer = await createBuyer('inventory-history-buyer');
+  cleanInventory(variant.id);
+  cleanInventory(other.id);
+  const receipt = await inventoryPost('receipts', { variantId: variant.id, quantity: 6, reason: 'Delivery' }, token);
+  assert.equal(receipt.response.status, 201);
+  assert.equal((await inventoryPost('receipts', { variantId: other.id, quantity: 1, reason: 'Other variant' }, token))
+    .response.status, 201);
+  assert.equal((await setCartItem(variant.id, 2, buyer.token)).response.status, 200);
+  const order = await checkout(buyer.address.id, buyer.token);
+  assert.equal(order.response.status, 201);
+
+  const path = `${inventoryPath}/movements?variantId=${variant.id}&limit=1`;
+  const list = await request(path, { token });
+  assert.equal(list.response.status, 200);
+  assert.deepEqual(list.body.meta, { page: 1, limit: 1, total: 2 });
+  const [sale] = list.body.data;
+  assert.deepEqual(sale, {
+    id: sale.id, createdAt: sale.createdAt, variantId: variant.id, actorId: buyer.user.id,
+    type: MovementType.Sale, delta: -2, reason: `Order ${order.body.data.id}`,
+  });
+  const pageTwo = await request(path + '&page=2', { token });
+  assert.equal(pageTwo.response.status, 200);
+  assert.deepEqual(pageTwo.body, {
+    success: true, data: [receipt.body.data.movement], meta: { page: 2, limit: 1, total: 2 },
+  });
+  assert.equal((await db.getRepository(InventoryStock).findOneByOrFail({ variantId: variant.id })).quantity, 4);
+});
