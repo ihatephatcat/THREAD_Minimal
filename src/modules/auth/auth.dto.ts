@@ -1,6 +1,6 @@
 import { ApiProperty } from '@nestjs/swagger';
 import { Transform } from 'class-transformer';
-import { IsByteLength, IsEmail, IsString, Length, Matches, MaxLength } from 'class-validator';
+import { IsByteLength, IsEmail, IsString, Length, Matches, MaxLength, NotContains } from 'class-validator';
 import { Role, type AuthenticatedUser } from './role';
 
 export class LoginDto {
@@ -23,6 +23,7 @@ export class RegisterDto extends LoginDto {
   @Transform(({ value }) => typeof value === 'string' ? value.trim() : value)
   @IsString()
   @Length(1, 100)
+  @NotContains('\0', { message: 'name must not contain a null character' })
   name!: string;
 }
 
