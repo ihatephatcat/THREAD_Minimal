@@ -1,6 +1,6 @@
 # Minimal THREAD API Contract
 
-All application routes use the `/api` prefix. Open `/api/docs` on the running app to try the live starter, Customer, and Inventory routes. This contract also lists planned Staff and Admin routes.
+All application routes use the `/api` prefix. Open `/api/docs` on the running app to try the live starter, Customer, Inventory, Staff, and Public Catalog routes. This contract also lists planned Admin management routes.
 
 ## Live starter routes
 
@@ -40,26 +40,30 @@ Cart quantity is an integer from 1 to 1,000. Checkout uses current catalog price
 
 Checkout responses include `X-Response-Time` in milliseconds when the request reaches the route interceptor. See the [Customer viva and demo guide](CUSTOMER_VIVA.md) for the checkout flow and verification steps.
 
-## Staff catalog routes to implement
+## Live Staff and Public Catalog routes
 
-Each resource has the following endpoints. Collection membership is managed by product create or update through `collectionIds`. An empty array clears product membership.
+Staff CRUD requires Staff or Admin. Collection membership is managed by product create or update through `collectionIds`. An empty array clears product membership.
 
 | Method | Path under `/api` | Access | Success |
 | --- | --- | --- | --- |
-| GET | `/{resource}` | Public | 200 paginated |
-| GET | `/{resource}/:id` | Public | 200 |
-| POST | `/{resource}` | Staff | 201 |
-| PATCH | `/{resource}/:id` | Staff | 200 |
-| DELETE | `/{resource}/:id` | Staff | 204 |
+| GET | `/staff/{resource}` | Staff or Admin | 200 paginated |
+| GET | `/staff/{resource}/:id` | Staff or Admin | 200 |
+| POST | `/staff/{resource}` | Staff or Admin | 201 |
+| PATCH | `/staff/{resource}/:id` | Staff or Admin | 200 |
+| DELETE | `/staff/{resource}/:id` | Staff or Admin | 204 |
+| GET | `/products` | Public | 200 paginated |
+| GET | `/products/:id` | Public | 200 |
 
 | Resource | Create fields | Optional fields |
 | --- | --- | --- |
 | `categories` | `name`, `slug` | `description` |
-| `collections` | `name`, `slug` | `description` |
+| `collections` | `name`, `slug` | `description`, `isActive` |
 | `products` | `name`, `slug`, `categoryId` | `description`, `collectionIds`, `isActive` |
 | `variants` | `productId`, `sku`, `size`, `color`, `priceMinor` | `isActive` |
 
-Use the entity length limits, lowercase URL slugs, and nonnegative integer prices. Public reads show active products and active variants whose parent is active. Add Staff-only `GET /api/staff/products` and `GET /api/staff/variants` paginated lists that include inactive records. Use the returned IDs for updates and deletes. Validate referenced category, product, and collection IDs before writing. Keep a variant on its original product after creation. Delete conflicts follow the rules in the specification.
+Staff reads include inactive records. Public reads show active products with their categories and active variants, including current prices. Product lists accept `categoryId`, Staff product lists also accept `isActive`, and Staff variant lists accept `productId`. Collection, product, and variant activation default to true. Category and collection descriptions may be null. Requests use lowercase URL slugs and nonnegative integer prices in BDT poisha.
+
+Catalog writes validate referenced category, product, and collection IDs. A variant keeps its original parent after creation. Deletion conflicts follow the [specification](MINIMAL_THREAD_SPEC.md). See the [Staff viva guide](STAFF_VIVA.md) for example bodies and the catalog-to-checkout flow.
 
 ## Live Inventory routes
 

@@ -11,11 +11,11 @@ Minimal THREAD is a single-brand fashion e-commerce REST API using NestJS, TypeS
 | `customer` | Own profile, addresses, cart, checkout, and order history |
 | `staff` | Manage categories, collections, products, and variants |
 | `inventory_manager` | Read stock and movements, receive stock, and adjust stock |
-| `admin` | Manage Staff and Inventory Manager accounts and access Inventory routes |
+| `admin` | Manage Staff and Inventory Manager accounts and access Inventory and Staff routes |
 | All active users | Authenticate and query their identity |
-| Public | Health, customer registration and login, and planned catalog reads |
+| Public | Health, customer registration and login, and active product catalog reads |
 
-Roles are explicit and non-hierarchical. The Admin route checks the Admin role. Staff routes check the Staff role. Inventory routes explicitly allow Inventory Manager and Admin. Registration always creates a Customer, and privileged users use the same login endpoint. The bootstrap command creates the initial Admin. Deactivating a user invalidates access on the next authenticated request because the guard loads the current active account.
+Roles are explicit and non-hierarchical. The Admin route checks the Admin role. Staff routes allow Staff and Admin. Inventory routes allow Inventory Manager and Admin. Registration always creates a Customer, and privileged users use the same login endpoint. The bootstrap command creates the initial Admin. Deactivating a user invalidates access on the next authenticated request because the guard loads the current active account.
 
 ## Canonical PostgreSQL schema
 
@@ -26,7 +26,7 @@ The TypeORM entities and initial migration are authoritative. Entity rows use UU
 | `users` | Unique normalized `email`, `name`, `passwordHash` (bcrypt, excluded from default selects), `role`, `isActive` |
 | `addresses` | `userId`, `recipientName`, `phone`, `line1`, nullable `line2`, `city`, `postalCode`, `countryCode` |
 | `categories` | `name`, unique `slug`, nullable `description` |
-| `collections` | `name`, unique `slug`, nullable `description` |
+| `collections` | `name`, unique `slug`, nullable `description`, `isActive` |
 | `products` | `categoryId`, `name`, unique `slug`, nullable `description`, `isActive` |
 | `product_collections` | `productId` and `collectionId` form the primary key |
 | `product_variants` | `productId`, unique `sku`, `size`, `color`, `priceMinor`, `isActive`. Also unique per product, size, and color |
@@ -84,7 +84,7 @@ The starter includes Swagger with bearer authentication, versioned migrations, v
 ## Milestones
 
 - Customer has implemented profile, addresses, cart, order history, and transactional checkout with PostgreSQL tests. The [Customer viva and demo guide](CUSTOMER_VIVA.md) covers these routes, request logging, and checkout timing.
-- Staff implements the four CRUD resources, then checks catalog visibility and deletion behavior.
+- Staff has implemented the four CRUD resources and public product browsing, with catalog visibility, deletion rollback, and checkout integration tests. See the [Staff viva guide](STAFF_VIVA.md).
 - Inventory has implemented stock and movement reads, receipts, and adjustments with concurrency and rollback tests. See the [Inventory viva guide](INVENTORY_VIVA.md).
 - Admin implements staff account listing, creation, role updates between staff roles, and activation changes, then verifies the complete role matrix.
 

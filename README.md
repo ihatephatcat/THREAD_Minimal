@@ -1,6 +1,6 @@
 # Minimal THREAD
 
-Minimal THREAD is a NestJS and PostgreSQL starter for the CSC4161 e-commerce backend. It runs with health, registration, login, authenticated identity, an Admin-only access check, and the Customer routes in the [API contract](docs/API_CONTRACT.md). See the [Customer viva and demo guide](docs/CUSTOMER_VIVA.md) for the Customer features.
+Minimal THREAD is a NestJS and PostgreSQL starter for the CSC4161 e-commerce backend. It runs with health, authentication, Customer shopping, Inventory management, Staff CRUD, and public product browsing. See the [API contract](docs/API_CONTRACT.md) and [Customer viva guide](docs/CUSTOMER_VIVA.md).
 
 ## Run locally
 
@@ -47,6 +47,10 @@ To try the Admin route, set `ADMIN_EMAIL` and `ADMIN_PASSWORD` in `.env` and run
 ## Inventory
 
 The **Inventory** section in Swagger lets Inventory Managers and Admins view stock, receive deliveries, adjust balances, and read movement history, including checkout sales. Use an existing variant ID. The [Inventory viva guide](docs/INVENTORY_VIVA.md) includes example requests, expected responses, and a rollback demonstration.
+
+## Staff catalog
+
+Run `npm run migration:run` to apply collection activation before starting the updated app. Staff and Admin can manage categories, collections, products, and variants through the **Staff** sections in Swagger. The **Public Catalog** section shows active products with active variants and current prices. Use the [Staff viva guide](docs/STAFF_VIVA.md) to create a variant, receive stock, and purchase it through Checkout.
 
 ## Verify and extend
 
