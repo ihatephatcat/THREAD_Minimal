@@ -41,12 +41,12 @@ async function insert(Entity, input, manager = db.manager) {
   return entity;
 }
 
-async function request(path, { method = 'GET', body, token } = {}) {
+async function request(path, { method = 'GET', body, token, signal } = {}) {
   const headers = {};
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   if (token) headers.Authorization = `Bearer ${token}`;
   const response = await fetch(`${url}/api${path}`, {
-    method, headers, body: body === undefined ? undefined : JSON.stringify(body),
+    method, headers, signal, body: body === undefined ? undefined : JSON.stringify(body),
   });
   return { response, body: response.status === 204 ? await response.text() : await response.json() };
 }
@@ -1299,4 +1299,300 @@ test('Inventory movement pagination includes Customer checkout sales with the or
     success: true, data: [receipt.body.data.movement], meta: { page: 2, limit: 1, total: 2 },
   });
   assert.equal((await db.getRepository(InventoryStock).findOneByOrFail({ variantId: variant.id })).quantity, 4);
+});
+
+const staffPath = '/staff';
+const catalogLabel = (name) => `${name}-${runId}`;
+
+function staffRequest(path, token, method = 'GET', body, signal) {
+  return request(staffPath + path, { method, body, token, signal });
+}
+
+async function createStaffRecord(resource, Entity, fields, token) {
+  const result = await staffRequest(`/${resource}`, token, 'POST', fields);
+  assert.equal(result.response.status, 201, JSON.stringify(result.body));
+  assert.equal(result.body.success, true);
+  deleteAfter.push([Entity, result.body.data.id]);
+  return result.body.data;
+}
+
+test('Staff Swagger documents 20 protected operations and two public product reads', async () => {
+  const { response, body: doc } = await request('/docs-json');
+  assert.equal(response.status, 200);
+  for (const [resource, name, tag] of [
+    ['categories', 'Category', 'Categories'],
+    ['collections', 'Collection', 'Collections'],
+    ['products', 'Product', 'Products'],
+    ['variants', 'Variant', 'Variants'],
+  ]) {
+    for (const [suffix, method, status, model] of [
+      ['', 'post', 201, `Create${name}Dto`], ['', 'get', 200],
+      ['/{id}', 'get', 200], ['/{id}', 'patch', 200, `Update${name}Dto`], ['/{id}', 'delete', 204],
+    ]) {
+      const operation = doc.paths[`/api/staff/${resource}${suffix}`][method];
+      assert.deepEqual(operation.tags, [`Staff — ${tag}`]);
+      assert.deepEqual(operation.security, [{ bearer: [] }]);
+      for (const code of [status, 400, 401, 403]) assert.ok(operation.responses[code]);
+      if (model) {
+        assert.equal(operation.requestBody.content['application/json'].schema.$ref, `#/components/schemas/${model}`);
+      }
+      if (status === 204) assert.equal(operation.responses[204].content, undefined);
+    }
+  }
+  for (const path of ['/api/products', '/api/products/{id}']) {
+    const operation = doc.paths[path].get;
+    assert.deepEqual(operation.tags, ['Public Catalog']);
+    assert.equal(operation.security, undefined);
+    assert.ok(operation.responses[200]);
+  }
+  const dto = doc.components.schemas;
+  assert.equal(dto.CreateVariantDto.properties.priceMinor.type, 'integer');
+  assert.equal(dto.UpdateVariantDto.properties.productId, undefined);
+  assert.equal(dto.CreateCollectionDto.properties.isActive.type, 'boolean');
+});
+
+test('Staff routes enforce the role matrix and public catalog accepts any caller', async () => {
+  const { token: staff } = await createActor('catalog-staff', Role.Staff);
+  const { token: admin } = await createActor('catalog-admin', Role.Admin);
+  const { token: customer } = await createActor('catalog-customer');
+  const { token: inventory } = await createActor('catalog-inventory', Role.InventoryManager);
+  const id = randomUUID();
+  for (const resource of ['categories', 'collections', 'products', 'variants']) {
+    for (const [path, method, body, expected] of [
+      [`/${resource}`, 'GET', undefined, 200],
+      [`/${resource}`, 'POST', {}, 400],
+      [`/${resource}/${id}`, 'GET', undefined, 404],
+      [`/${resource}/${id}`, 'PATCH', {}, 404],
+      [`/${resource}/${id}`, 'DELETE', undefined, 404],
+    ]) {
+      for (const [token, status] of [[undefined, 401], [customer, 403], [inventory, 403], [staff, expected], [admin, expected]]) {
+        assert.equal((await staffRequest(path, token, method, body)).response.status, status);
+      }
+    }
+  }
+  for (const token of [undefined, customer, inventory, staff, admin]) {
+    assert.equal((await request('/products', { token })).response.status, 200);
+  }
+});
+
+test('Staff performs Category and Collection CRUD with pagination and duplicate protection', async () => {
+  const { token } = await createActor('catalog-entries', Role.Staff);
+  for (const [resource, Entity, fields] of [
+    ['categories', Category, {}], ['collections', Collection, { isActive: false }],
+  ]) {
+    const input = { name: 'A campus line', slug: catalogLabel(`000-${resource}`), description: 'Summer line', ...fields };
+    const entry = await createStaffRecord(resource, Entity, input, token);
+    const second = await createStaffRecord(resource, Entity, {
+      name: 'Another line', slug: catalogLabel(`001-${resource}`),
+    }, token);
+    const path = `/${resource}/${entry.id}`;
+    const firstPage = await staffRequest(`/${resource}?limit=1&page=1`, token);
+    const nextPage = await staffRequest(`/${resource}?limit=1&page=2`, token);
+    assert.equal(firstPage.response.status, 200);
+    assert.equal(nextPage.response.status, 200);
+    assert.equal(firstPage.body.data.length, 1);
+    assert.equal(nextPage.body.data.length, 1);
+    assert.ok(firstPage.body.data[0].slug < nextPage.body.data[0].slug);
+    assert.deepEqual(nextPage.body.meta, { page: 2, limit: 1, total: firstPage.body.meta.total });
+    const read = await staffRequest(path, token);
+    assert.equal(read.response.status, 200);
+    assert.deepEqual(read.body.data, entry);
+    assertError(await staffRequest(`/${resource}`, token, 'POST', input), 409);
+    assertError(await staffRequest(path, token, 'PATCH', { slug: second.slug }), 409);
+    assertError(await staffRequest(path, token, 'PATCH', { name: null }), 400);
+    assertError(await staffRequest(`/${resource}`, token, 'POST', { ...input, slug: 'Invalid slug' }), 400);
+    assertError(await staffRequest(`/${resource}/not-a-uuid`, token), 400);
+    const updated = await staffRequest(path, token, 'PATCH', {
+      name: 'Updated line', description: null, ...(resource === 'collections' ? { isActive: true } : {}),
+    });
+    assert.equal(updated.response.status, 200);
+    assert.equal(updated.body.data.name, 'Updated line');
+    assert.equal(updated.body.data.description, null);
+    if (resource === 'collections') assert.equal(updated.body.data.isActive, true);
+    const deleted = await staffRequest(path, token, 'DELETE');
+    assert.equal(deleted.response.status, 204);
+    assert.equal(deleted.body, '');
+    assertError(await staffRequest(path, token), 404);
+    assertError(await staffRequest(path, token, 'DELETE'), 404);
+  }
+});
+
+test('Staff product CRUD checks relationships, updates membership, and preserves linked products on collection deletion', async () => {
+  const { token } = await createActor('catalog-products', Role.Staff);
+  const category = await createStaffRecord('categories', Category, { name: 'Shirts', slug: catalogLabel('product-category') }, token);
+  const replacement = await createStaffRecord('categories', Category, {
+    name: 'Overshirts', slug: catalogLabel('replacement-category'),
+  }, token);
+  const collection = await createStaffRecord('collections', Collection, { name: 'Summer', slug: catalogLabel('summer') }, token);
+  const input = {
+    name: 'Linen shirt', slug: catalogLabel('linen-shirt'), categoryId: category.id,
+    collectionIds: [collection.id], isActive: false,
+  };
+  assertError(await staffRequest('/products', token, 'POST', { ...input, categoryId: randomUUID() }), 404);
+  assertError(await staffRequest('/products', token, 'POST', { ...input, collectionIds: [collection.id, randomUUID()] }), 404);
+  assertError(await staffRequest('/products', token, 'POST', { ...input, collectionIds: [collection.id, collection.id.toUpperCase()] }), 400);
+  const product = await createStaffRecord('products', Product, input, token);
+  const path = `/products/${product.id}`;
+  const read = await staffRequest(path, token);
+  assert.equal(read.response.status, 200);
+  assert.deepEqual(read.body.data, product);
+  assert.deepEqual(product.collectionIds, input.collectionIds);
+  const filtered = await staffRequest(`/products?categoryId=${category.id}&isActive=false&limit=1`, token);
+  assert.deepEqual(filtered.body, { success: true, data: [product], meta: { page: 1, limit: 1, total: 1 } });
+  assertError(await staffRequest('/products?isActive=invalid', token), 400);
+  assertError(await staffRequest(`/categories/${category.id}`, token, 'DELETE'), 409);
+  assertError(await staffRequest(path, token, 'PATCH', { name: 'Must roll back', collectionIds: [randomUUID()] }), 404);
+  assert.deepEqual((await staffRequest(path, token)).body.data, product);
+
+  const cleared = await staffRequest(path, token, 'PATCH', {
+    categoryId: replacement.id, collectionIds: [], isActive: true,
+  });
+  assert.equal(cleared.response.status, 200);
+  assert.deepEqual(cleared.body.data.collectionIds, []);
+  assert.equal(cleared.body.data.categoryId, replacement.id);
+  assert.equal(cleared.body.data.isActive, true);
+  const linked = await staffRequest(path, token, 'PATCH', { collectionIds: [collection.id] });
+  assert.equal(linked.response.status, 200);
+  assert.deepEqual(linked.body.data.collectionIds, [collection.id]);
+  assert.equal((await staffRequest(`/collections/${collection.id}`, token, 'DELETE')).response.status, 204);
+  const afterUnlink = await staffRequest(path, token);
+  assert.equal(afterUnlink.response.status, 200);
+  assert.deepEqual(afterUnlink.body.data.collectionIds, []);
+  assert.equal((await staffRequest(path, token, 'DELETE')).response.status, 204);
+  assertError(await staffRequest(path, token), 404);
+});
+
+test('Staff variant CRUD validates pricing and relationships and deletes an unused zero balance', async () => {
+  const { token } = await createActor('catalog-variants', Role.Staff);
+  const { product } = await createCatalog('catalog-variants');
+  const input = { productId: product.id, sku: catalogLabel('SKU'), size: 'XL', color: 'Red', priceMinor: 120000 };
+  for (const priceMinor of [-1, 0.1, '100', 2_147_483_648]) {
+    assertError(await staffRequest('/variants', token, 'POST', { ...input, priceMinor }), 400);
+  }
+  assertError(await staffRequest('/variants', token, 'POST', { ...input, productId: randomUUID() }), 404);
+  const variant = await createStaffRecord('variants', ProductVariant, input, token);
+  const path = `/variants/${variant.id}`;
+  assert.equal(variant.isActive, true);
+  const detail = await staffRequest(path, token);
+  assert.equal(detail.response.status, 200);
+  assert.deepEqual(detail.body.data, variant);
+  const filtered = await staffRequest(`/variants?productId=${product.id}&limit=1`, token);
+  assert.equal(filtered.response.status, 200);
+  assert.deepEqual(filtered.body.meta, { page: 1, limit: 1, total: 3 });
+  assertError(await staffRequest('/variants', token, 'POST', { ...input, size: 'XS' }), 409);
+  assertError(await staffRequest('/variants', token, 'POST', { ...input, sku: catalogLabel('ANOTHER-SKU') }), 409);
+  assertError(await staffRequest(path, token, 'PATCH', { productId: product.id }), 400);
+  assertError(await staffRequest(path, token, 'PATCH', { priceMinor: null }), 400);
+  const changed = await staffRequest(path, token, 'PATCH', { priceMinor: 0, isActive: false });
+  assert.equal(changed.response.status, 200);
+  assert.equal(changed.body.data.priceMinor, 0);
+  assert.equal(changed.body.data.isActive, false);
+  assertError(await staffRequest(`/products/${product.id}`, token, 'DELETE'), 409);
+
+  const balance = await insert(InventoryStock, { variantId: variant.id, quantity: 1 });
+  assertError(await staffRequest(path, token, 'DELETE'), 409);
+  const stock = db.getRepository(InventoryStock);
+  assert.equal((await stock.findOneByOrFail({ id: balance.id })).quantity, 1);
+  await stock.update(balance.id, { quantity: 0 });
+  const deleted = await staffRequest(path, token, 'DELETE');
+  assert.equal(deleted.response.status, 204);
+  assert.equal(deleted.body, '');
+  assert.equal(await stock.countBy({ id: balance.id }), 0);
+  assertError(await staffRequest(path, token), 404);
+});
+
+test('public product pages hide inactive products and variants and page products without duplicating them', async () => {
+  const { token } = await createActor('catalog-public', Role.Staff);
+  const category = await createStaffRecord('categories', Category, { name: 'Basics', slug: catalogLabel('public-category') }, token);
+  const products = [];
+  for (const [suffix, isActive] of [['a', true], ['b', true], ['c', false]]) {
+    products.push(await createStaffRecord('products', Product, {
+      name: 'Public shirt ' + suffix, slug: catalogLabel('public-shirt-' + suffix), categoryId: category.id, isActive,
+    }, token));
+  }
+  const [first, second, hidden] = products;
+  const input = { productId: first.id, priceMinor: 120000, color: 'Black' };
+  const visible = await createStaffRecord('variants', ProductVariant, { ...input, sku: catalogLabel('PUB-M'), size: 'M' }, token);
+  await createStaffRecord('variants', ProductVariant, { ...input, sku: catalogLabel('PUB-L'), size: 'L' }, token);
+  await createStaffRecord('variants', ProductVariant, { ...input, sku: catalogLabel('PUB-S'), size: 'S', isActive: false }, token);
+  const filter = `/products?categoryId=${category.id}&limit=1`;
+  const firstPage = await request(filter);
+  const secondPage = await request(filter + '&page=2');
+  assert.equal(firstPage.response.status, 200);
+  assert.equal(secondPage.response.status, 200);
+  assert.equal(firstPage.body.data[0].id, first.id);
+  assert.equal(secondPage.body.data[0].id, second.id);
+  assert.deepEqual(secondPage.body.meta, { page: 2, limit: 1, total: 2 });
+  const detail = await request(`/products/${first.id}`);
+  assert.equal(detail.response.status, 200);
+  assert.deepEqual(detail.body.data, firstPage.body.data[0]);
+  assert.deepEqual(detail.body.data.category, { id: category.id, name: category.name, slug: category.slug });
+  assert.equal(detail.body.data.variants.length, 2);
+  assert.deepEqual(detail.body.data.variants[1], {
+    id: visible.id, sku: visible.sku, size: 'M', color: 'Black', priceMinor: 120000,
+  });
+  assert.equal(detail.body.data.isActive, undefined);
+  assertError(await request(`/products/${hidden.id}`), 404);
+  assertError(await request('/products/bad-uuid'), 400);
+  assertError(await request('/products?categoryId=bad'), 400);
+});
+
+test('protected variant deletion rolls back zero-balance cleanup for cart references and concurrent locks', async () => {
+  const { token } = await createActor('catalog-delete-conflict', Role.Staff);
+  const { variants: [inCart, locked] } = await createCatalog('catalog-delete-conflict');
+  const { token: customer } = await createActor('catalog-delete-cart');
+  const inCartStock = await insert(InventoryStock, { variantId: inCart.id, quantity: 0 });
+  const lockedStock = await insert(InventoryStock, { variantId: locked.id, quantity: 0 });
+  const stock = db.getRepository(InventoryStock);
+  assert.equal((await setCartItem(inCart.id, 1, customer)).response.status, 200);
+  assertError(await staffRequest(`/variants/${inCart.id}`, token, 'DELETE'), 409);
+  assert.equal((await stock.findOneByOrFail({ id: inCartStock.id })).quantity, 0);
+  assert.equal((await request('/cart', { token: customer })).body.data.items[0].variantId, inCart.id);
+  assert.equal((await removeCartItem(inCart.id, customer)).response.status, 204);
+  assert.equal((await staffRequest(`/variants/${inCart.id}`, token, 'DELETE')).response.status, 204);
+
+  await db.transaction(async (manager) => {
+    await manager.getRepository(ProductVariant).findOneOrFail({
+      where: { id: locked.id }, lock: { mode: 'for_key_share' },
+    });
+    assertError(await staffRequest(`/variants/${locked.id}`, token, 'DELETE', undefined, AbortSignal.timeout(5000)),
+      409, 'Variant is in use by another operation');
+    assert.equal((await stock.findOneByOrFail({ id: lockedStock.id })).quantity, 0);
+  });
+});
+
+test('a Staff-created variant can receive stock and be purchased, and historical references survive catalog edits', async () => {
+  const { token } = await createActor('catalog-integration', Role.Staff);
+  const { token: manager } = await createActor('catalog-integration-inventory', Role.InventoryManager);
+  const category = await createStaffRecord('categories', Category, { name: 'Shirts', slug: catalogLabel('integrated-category') }, token);
+  const product = await createStaffRecord('products', Product, {
+    name: 'Linen shirt', slug: catalogLabel('integrated-shirt'), categoryId: category.id, isActive: false,
+  }, token);
+  const variant = await createStaffRecord('variants', ProductVariant, {
+    productId: product.id, sku: catalogLabel('INTEGRATED-M'), size: 'M', color: 'Blue', priceMinor: 120000,
+  }, token);
+  const buyer = await createBuyer('catalog-integration-buyer');
+  cleanInventory(variant.id);
+  const receipt = await inventoryPost('receipts', { variantId: variant.id, quantity: 2, reason: 'Delivery' }, manager);
+  assert.equal(receipt.response.status, 201);
+  assertError(await setCartItem(variant.id, 2, buyer.token), 409);
+  assert.equal((await staffRequest(`/products/${product.id}`, token, 'PATCH', { isActive: true })).response.status, 200);
+  assert.equal((await setCartItem(variant.id, 2, buyer.token)).response.status, 200);
+  const order = await checkout(buyer.address.id, buyer.token);
+  assert.equal(order.response.status, 201);
+  assert.equal(order.body.data.totalMinor, 240000);
+  const balance = await request(`/inventory/stock/${variant.id}`, { token: manager });
+  assert.equal(balance.body.data.quantity, 0);
+  const path = `/variants/${variant.id}`;
+  assertError(await staffRequest(path, token, 'DELETE'), 409);
+  assert.equal(await db.getRepository(InventoryStock).countBy({ variantId: variant.id, quantity: 0 }), 1);
+  const movements = await request(`/inventory/movements?variantId=${variant.id}`, { token: manager });
+  assert.deepEqual(movements.body.data.map(({ type, delta }) => [type, delta]), [['sale', -2], ['receipt', 2]]);
+
+  assert.equal((await staffRequest(path, token, 'PATCH', { priceMinor: 125000, isActive: false })).response.status, 200);
+  assert.equal((await staffRequest(`/products/${product.id}`, token, 'PATCH', { name: 'Renamed shirt' })).response.status, 200);
+  const history = await request(`/orders/${order.body.data.id}`, { token: buyer.token });
+  assert.equal(history.response.status, 200);
+  assert.deepEqual(history.body.data, order.body.data);
+  assert.deepEqual((await request(`/products/${product.id}`)).body.data.variants, []);
 });
