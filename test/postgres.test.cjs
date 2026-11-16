@@ -1596,3 +1596,255 @@ test('a Staff-created variant can receive stock and be purchased, and historical
   assert.deepEqual(history.body.data, order.body.data);
   assert.deepEqual((await request(`/products/${product.id}`)).body.data.variants, []);
 });
+
+const staffAccountsPath = '/admin/staff';
+
+function adminRequest(path, token, method = 'GET', body) {
+  return request(path, { token, method, body });
+}
+
+async function createManagedAccount(token, label, role, fields = {}) {
+  const result = await adminRequest(staffAccountsPath, token, 'POST', {
+    name: 'Managed Account', email: email(label), password, role, ...fields,
+  });
+  assert.equal(result.response.status, 201, JSON.stringify(result.body));
+  const account = result.body.data;
+  deleteAfter.push([User, account.id]);
+  assert.deepEqual(Object.keys(account).sort(),
+    ['id', 'email', 'name', 'role', 'isActive', 'createdAt', 'updatedAt'].sort());
+  assert.equal(result.body.success, true);
+  assert.equal(account.role, role);
+  assert.equal(account.isActive, true);
+  return account;
+}
+
+function loginManaged(emailAddress) {
+  return request('/auth/login', { method: 'POST', body: { email: emailAddress, password } });
+}
+
+test('Admin Swagger documents account lifecycle, managed roles, and safe schemas', async () => {
+  const { response, body: doc } = await request('/docs-json');
+  assert.equal(response.status, 200);
+  for (const [path, method, success] of [
+    ['/api/admin/access', 'get', 200],
+    ['/api/admin/staff', 'post', 201],
+    ['/api/admin/staff', 'get', 200],
+    ['/api/admin/staff/{id}', 'get', 200],
+    ['/api/admin/staff/{id}', 'patch', 200],
+    ['/api/admin/staff/{id}', 'delete', 204],
+  ]) {
+    const operation = doc.paths[path][method];
+    assert.deepEqual(operation.tags, ['Admin']);
+    assert.deepEqual(operation.security, [{ bearer: [] }]);
+    for (const code of [success, 401, 403]) assert.ok(operation.responses[code]);
+    if (path.endsWith('/{id}')) assert.ok(operation.responses[404]);
+    if (path !== '/api/admin/access') assert.ok(operation.responses[400]);
+    if (success === 204) assert.equal(operation.responses[204].content, undefined);
+  }
+  const contentType = 'application/json';
+  const post = doc.paths['/api/admin/staff'].post;
+  const examples = post.requestBody.content[contentType].examples;
+  assert.deepEqual(Object.values(examples).map(({ value }) => value.role).sort(), [Role.InventoryManager, Role.Staff]);
+  assert.ok(post.responses[409]);
+  const patch = doc.paths['/api/admin/staff/{id}'].patch;
+  assert.ok(patch.responses[409]);
+  const parameters = doc.paths['/api/admin/staff'].get.parameters;
+  assert.ok(parameters.some(({ name, schema }) => name === 'limit' && schema.maximum === 100));
+  assert.ok(parameters.some(({ name, schema }) => name === 'isActive' && schema.type === 'boolean'));
+  const schemas = doc.components.schemas;
+  assert.deepEqual(schemas.ManagedStaffRole.enum, [Role.Staff, Role.InventoryManager]);
+  assert.ok(schemas.CreateStaffAccountDto.properties.password);
+  assert.equal(schemas.UpdateStaffAccountDto.properties.password, undefined);
+  assert.equal(schemas.StaffAccountResponseDto.properties.passwordHash, undefined);
+  assert.equal(schemas.StaffAccountResponseDto.properties.password, undefined);
+});
+
+test('all Admin operations require an active Admin JWT', async () => {
+  const { token: admin } = await createActor('management-rbac-admin', Role.Admin);
+  const { token: customer } = await createActor('management-rbac-customer');
+  const { token: staff } = await createActor('management-rbac-staff', Role.Staff);
+  const { token: inventory } = await createActor('management-rbac-inventory', Role.InventoryManager);
+  const unknownAccount = `${staffAccountsPath}/${randomUUID()}`;
+  for (const [path, method, adminStatus] of [
+    ['/admin/access', 'GET', 200],
+    [staffAccountsPath, 'GET', 200],
+    [staffAccountsPath, 'POST', 400],
+    [unknownAccount, 'GET', 404],
+    [unknownAccount, 'PATCH', 404],
+    [unknownAccount, 'DELETE', 404],
+  ]) {
+    const body = ['POST', 'PATCH'].includes(method) ? {} : undefined;
+    assertError(await adminRequest(path, undefined, method, body), 401);
+    for (const token of [customer, staff, inventory]) {
+      assertError(await adminRequest(path, token, method, body), 403);
+    }
+    assert.equal((await adminRequest(path, admin, method, body)).response.status, adminStatus);
+  }
+  assertError(await request('/customers/me', { token: admin }), 403);
+});
+
+test('Admin creates active Staff and Inventory Manager accounts with normalized email and bcrypt hashes', async () => {
+  const { token: admin } = await createActor('management-create-admin', Role.Admin);
+  for (const [role, allowed, forbidden] of [
+    [Role.Staff, '/staff/categories', '/inventory/stock'],
+    [Role.InventoryManager, '/inventory/stock', '/staff/categories'],
+  ]) {
+    const label = `created-${role}`;
+    const normalized = email(label);
+    const account = await createManagedAccount(admin, label, role, {
+      name: '  New managed account  ', email: ` ${normalized.toUpperCase()} `,
+    });
+    assert.equal(account.name, 'New managed account');
+    assert.equal(account.email, normalized);
+    assert.ok(Number.isFinite(Date.parse(account.createdAt)));
+    assert.ok(Number.isFinite(Date.parse(account.updatedAt)));
+    const stored = await db.getRepository(User).createQueryBuilder('account')
+      .addSelect('account.passwordHash').where('account.id = :id', { id: account.id }).getOneOrFail();
+    assert.match(stored.passwordHash, /^\$2[ab]\$12\$/);
+    assert.notEqual(stored.passwordHash, password);
+
+    const signedIn = await loginManaged(account.email.toUpperCase());
+    assert.equal(signedIn.response.status, 200);
+    assert.deepEqual(signedIn.body.data.user, { id: account.id, name: account.name, email: account.email, role });
+    const { accessToken } = signedIn.body.data;
+    assert.equal((await request(allowed, { token: accessToken })).response.status, 200);
+    assertError(await request(forbidden, { token: accessToken }), 403);
+    assertError(await adminRequest(staffAccountsPath, admin, 'POST', {
+      name: 'Duplicate email', email: normalized.toUpperCase(), password, role,
+    }), 409);
+  }
+});
+
+test('Admin creation rejects invalid identity fields, weak passwords, and escalation attempts', async () => {
+  const { token: admin } = await createActor('management-validation-admin', Role.Admin);
+  const body = { name: 'New staff', email: email('management-invalid'), password, role: Role.Staff };
+  for (const invalid of [
+    { name: ' ' }, { name: 'x'.repeat(101) }, { name: 'x\u0000y' },
+    { email: 'bad-email' }, { password: 'short' }, { password: 'é'.repeat(37) },
+    { role: Role.Admin }, { role: Role.Customer }, { role: null }, { role: undefined },
+    { isActive: false }, { passwordHash: 'submitted-hash' },
+  ]) {
+    assertError(await adminRequest(staffAccountsPath, admin, 'POST', { ...body, ...invalid }), 400);
+  }
+  assertError(await request('/auth/register', {
+    method: 'POST', body: { ...body, role: Role.Admin },
+  }), 400);
+  assert.equal(await db.getRepository(User).countBy({ email: body.email }), 0);
+});
+
+test('Admin reads only managed accounts with deterministic pagination and role and status filters', async () => {
+  const { user: adminUser, token: admin } = await createActor('management-page-admin', Role.Admin);
+  const { user: customer } = await createActor('management-page-customer');
+  const second = await createManagedAccount(admin, 'management-page-second', Role.Staff, { name: '001 Staff' });
+  const first = await createManagedAccount(admin, 'management-page-first', Role.Staff, { name: '000 Staff' });
+  const inventory = await createManagedAccount(admin, 'management-page-inventory', Role.InventoryManager);
+  for (const account of [first, second]) {
+    const result = await adminRequest(`${staffAccountsPath}/${account.id}`, admin, 'PATCH', { isActive: false });
+    assert.equal(result.response.status, 200);
+    assert.equal(result.body.data.isActive, false);
+  }
+  const filter = `${staffAccountsPath}?role=staff&isActive=false&limit=1`;
+  for (const [index, account] of [first, second].entries()) {
+    const result = await adminRequest(filter + '&page=' + (index + 1), admin);
+    assert.equal(result.response.status, 200);
+    assert.deepEqual(result.body.meta, { page: index + 1, limit: 1, total: 2 });
+    assert.equal(result.body.data[0].id, account.id);
+    assert.equal(result.body.data[0].passwordHash, undefined);
+  }
+  const all = await adminRequest(staffAccountsPath + '?limit=100', admin);
+  assert.equal(all.response.status, 200);
+  assert.ok(all.body.data.some(({ id }) => id === inventory.id));
+  assert.ok(all.body.data.every(({ role }) => [Role.Staff, Role.InventoryManager].includes(role)));
+  for (const id of [adminUser.id, customer.id, randomUUID()]) {
+    for (const method of ['GET', 'PATCH', 'DELETE']) {
+      assertError(await adminRequest(`${staffAccountsPath}/${id}`, admin, method,
+        method === 'PATCH' ? { name: 'Disallowed' } : undefined), 404, 'Managed account not found');
+    }
+  }
+  assert.equal((await db.getRepository(User).findOneByOrFail({ id: customer.id })).isActive, true);
+  const detail = await adminRequest(`${staffAccountsPath}/${inventory.id}`, admin);
+  assert.equal(detail.response.status, 200);
+  assert.deepEqual(detail.body.data, inventory);
+  assertError(await adminRequest(staffAccountsPath + '/bad-uuid', admin), 400);
+  for (const query of ['?role=admin', '?isActive=yes', '?limit=101']) {
+    assertError(await adminRequest(staffAccountsPath + query, admin), 400);
+  }
+});
+
+test('Admin can update identity and managed roles without changing passwords or permitting escalation', async () => {
+  const { token: admin } = await createActor('management-update-admin', Role.Admin);
+  const staff = await createManagedAccount(admin, 'management-update-staff', Role.Staff);
+  const duplicate = await createManagedAccount(admin, 'management-update-duplicate', Role.InventoryManager);
+  const path = `${staffAccountsPath}/${staff.id}`;
+  const initialLogin = await loginManaged(staff.email);
+  assert.equal(initialLogin.response.status, 200);
+  const { accessToken } = initialLogin.body.data;
+  assertError(await adminRequest(path, admin, 'PATCH', { email: ` ${duplicate.email.toUpperCase()} ` }), 409);
+  for (const invalid of [
+    { role: Role.Admin }, { role: Role.Customer }, { role: null }, { email: null },
+    { name: null }, { isActive: null }, { isActive: 'false' }, { password: 'Unchanged123!' },
+  ]) {
+    assertError(await adminRequest(path, admin, 'PATCH', invalid), 400);
+  }
+  const renamed = email('management-renamed');
+  const updated = await adminRequest(path, admin, 'PATCH', {
+    name: '  Renamed Staff ', email: ` ${renamed.toUpperCase()} `, role: Role.InventoryManager,
+  });
+  assert.equal(updated.response.status, 200);
+  assert.deepEqual(updated.body.data, {
+    ...staff, name: 'Renamed Staff', email: renamed, role: Role.InventoryManager,
+    updatedAt: updated.body.data.updatedAt,
+  });
+  assertError(await loginManaged(staff.email), 401);
+  assert.equal((await loginManaged(renamed)).response.status, 200);
+  assertError(await request('/staff/categories', { token: accessToken }), 403);
+  assert.equal((await request('/inventory/stock', { token: accessToken })).response.status, 200);
+});
+
+test('deactivating Staff or Inventory accounts blocks login and existing JWTs and preserves movement attribution', async () => {
+  const { token: admin } = await createActor('management-deactivate-admin', Role.Admin);
+  const staff = await createManagedAccount(admin, 'management-deactivate-staff', Role.Staff);
+  const manager = await createManagedAccount(admin, 'deactivate-inventory', Role.InventoryManager);
+  const { variants: [variant] } = await createCatalog('management-attribution');
+  cleanInventory(variant.id);
+  let movement;
+  for (const [account, allowed] of [[staff, '/staff/categories'], [manager, '/inventory/stock']]) {
+    const login = await loginManaged(account.email);
+    assert.equal(login.response.status, 200);
+    const { accessToken } = login.body.data;
+    assert.equal((await request(allowed, { token: accessToken })).response.status, 200);
+    if (account.role === Role.InventoryManager) {
+      const receipt = await inventoryPost('receipts', { variantId: variant.id, quantity: 3, reason: 'Delivery' }, accessToken);
+      assert.equal(receipt.response.status, 201);
+      movement = receipt.body.data.movement;
+    }
+
+    const path = `${staffAccountsPath}/${account.id}`;
+    const first = await adminRequest(path, admin, 'DELETE');
+    assert.equal(first.response.status, 204);
+    assert.equal(first.body, '');
+    const inactive = await adminRequest(path, admin);
+    assert.equal(inactive.body.data.id, account.id);
+    assert.equal(inactive.body.data.isActive, false);
+    const repeated = await adminRequest(path, admin, 'DELETE');
+    assert.equal(repeated.response.status, 204);
+    assert.equal(repeated.body, '');
+    assert.deepEqual((await adminRequest(path, admin)).body, inactive.body);
+    assertError(await loginManaged(account.email), 401);
+    assertError(await request(allowed, { token: accessToken }), 401);
+    assertError(await request('/auth/me', { token: accessToken }), 401);
+  }
+  const history = await request(`/inventory/movements?variantId=${variant.id}`, { token: admin });
+  assert.equal(history.response.status, 200);
+  assert.equal(history.body.meta.total, 1);
+  assert.equal(movement.actorId, manager.id);
+  assert.deepEqual(history.body.data, [movement]);
+  assert.equal((await db.getRepository(InventoryMovement).findOneByOrFail({ id: movement.id })).actorId, manager.id);
+  assert.equal((await db.getRepository(User).findOneByOrFail({ id: manager.id })).isActive, false);
+  assert.equal((await db.getRepository(InventoryStock).findOneByOrFail({ variantId: variant.id })).quantity, 3);
+
+  const reactivated = await adminRequest(`${staffAccountsPath}/${manager.id}`, admin, 'PATCH', { isActive: true });
+  assert.equal(reactivated.response.status, 200);
+  assert.equal(reactivated.body.data.isActive, true);
+  assert.equal((await loginManaged(manager.email)).response.status, 200);
+});
