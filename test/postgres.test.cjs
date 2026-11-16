@@ -1,7 +1,9 @@
 const assert = require('node:assert/strict');
-const { randomUUID } = require('node:crypto');
+const { execFile } = require('node:child_process');
+const { randomBytes, randomUUID } = require('node:crypto');
 const { after, before, test } = require('node:test');
 const { setTimeout: delay } = require('node:timers/promises');
+const { promisify } = require('node:util');
 require('reflect-metadata');
 require('dotenv').config();
 
@@ -1847,4 +1849,191 @@ test('deactivating Staff or Inventory accounts blocks login and existing JWTs an
   assert.equal(reactivated.response.status, 200);
   assert.equal(reactivated.body.data.isActive, true);
   assert.equal((await loginManaged(manager.email)).response.status, 200);
+});
+
+test('registration rejects null characters in a name as a field validation error', async () => {
+  const submittedEmail = email('null-name');
+  deleteAfter.push([User, { email: submittedEmail }]);
+  const result = await request('/auth/register', {
+    method: 'POST', body: { name: 'Sam\u0000Rahman', email: submittedEmail, password },
+  });
+  assertError(result, 400);
+  assert.deepEqual(result.body.message, ['name must not contain a null character']);
+  assert.equal(await db.getRepository(User).countBy({ email: submittedEmail }), 0);
+});
+
+test('signed expired and malformed JWTs are rejected on protected endpoints', async () => {
+  const { user, token } = await createActor('expired-jwt', Role.Admin);
+  const expired = await app.get(JwtService).signAsync({ sub: user.id }, { expiresIn: -60 });
+  assert.equal((await request('/admin/access', { token })).response.status, 200);
+  for (const rejected of [expired, 'malformed.jwt.token']) {
+    assertError(await request('/admin/access', { token: rejected }), 401, 'Invalid or expired access token');
+  }
+});
+
+test('seeded Admin, Staff, Inventory Manager, and Customer complete one purchase over HTTP', async () => {
+  const adminEmail = email('defense-admin');
+  const adminPassword = randomBytes(24).toString('base64url');
+  const seed = promisify(execFile);
+  const seedArgs = [require.resolve('../dist/modules/admin/seed-admin')];
+  const seedEnv = { ...process.env, ADMIN_EMAIL: adminEmail, ADMIN_PASSWORD: adminPassword };
+  deleteAfter.push([User, { email: adminEmail }]);
+  const firstSeed = await seed(process.execPath, seedArgs, { env: seedEnv });
+  assert.match(firstSeed.stdout, /Admin account created/);
+  const secondSeed = await seed(process.execPath, seedArgs, {
+    env: { ...seedEnv, ADMIN_PASSWORD: randomBytes(24).toString('base64url') },
+  });
+  assert.match(secondSeed.stdout, /Admin account already exists/);
+  assert.equal(await db.getRepository(User).countBy({ email: adminEmail, role: Role.Admin }), 1);
+
+  const adminLogin = await request('/auth/login', {
+    method: 'POST', body: { email: adminEmail, password: adminPassword },
+  });
+  assert.equal(adminLogin.response.status, 200);
+  const admin = adminLogin.body.data.accessToken;
+  assert.equal((await request('/admin/access', { token: admin })).response.status, 200);
+  const staff = await createManagedAccount(admin, 'defense-staff', Role.Staff);
+  const manager = await createManagedAccount(admin, 'defense-inventory', Role.InventoryManager);
+  const managed = await adminRequest(staffAccountsPath + '?role=inventory_manager&isActive=true', admin);
+  assert.equal(managed.response.status, 200);
+  assert.ok(managed.body.data.some(({ id }) => id === manager.id));
+  const managedPath = `${staffAccountsPath}/${staff.id}`;
+  assert.equal((await adminRequest(managedPath, admin)).body.data.role, Role.Staff);
+  const renamed = await adminRequest(managedPath, admin, 'PATCH', { name: 'Catalog Lead' });
+  assert.equal(renamed.response.status, 200);
+  assert.equal(renamed.body.data.name, 'Catalog Lead');
+  const disposable = await createManagedAccount(admin, 'defense-disposable', Role.Staff);
+  assert.equal((await adminRequest(`${staffAccountsPath}/${disposable.id}`, admin, 'DELETE')).response.status, 204);
+  assertError(await loginManaged(disposable.email), 401);
+  const staffLogin = await loginManaged(staff.email);
+  const inventoryLogin = await loginManaged(manager.email);
+  assert.equal(staffLogin.response.status, 200);
+  assert.equal(inventoryLogin.response.status, 200);
+  const staffToken = staffLogin.body.data.accessToken;
+  const inventoryToken = inventoryLogin.body.data.accessToken;
+
+  const category = await createStaffRecord('categories', Category, {
+    name: 'T-Shirts', slug: catalogLabel('defense-shirts'),
+  }, staffToken);
+  const collection = await createStaffRecord('collections', Collection, {
+    name: 'Essential Cotton', slug: catalogLabel('defense-essentials'),
+  }, staffToken);
+  const product = await createStaffRecord('products', Product, {
+    name: 'THREAD Essential Cotton T-Shirt', slug: catalogLabel('defense-tee'),
+    categoryId: category.id, collectionIds: [collection.id], isActive: false,
+  }, staffToken);
+  const variant = await createStaffRecord('variants', ProductVariant, {
+    productId: product.id, sku: catalogLabel('DEFENSE-COTTON-BLK-M'),
+    size: 'M', color: 'Black', priceMinor: 120000, isActive: false,
+  }, staffToken);
+  const productPath = `/products/${product.id}`;
+  assertError(await request(productPath), 404);
+  const publish = await staffRequest(productPath, staffToken, 'PATCH', { isActive: true });
+  assert.equal(publish.response.status, 200);
+  assert.deepEqual(publish.body.data.collectionIds, [collection.id]);
+  assert.equal((await staffRequest(`/variants/${variant.id}`, staffToken, 'PATCH', { isActive: true })).response.status, 200);
+  const catalog = await request(`/products?categoryId=${category.id}&limit=1`);
+  assert.equal(catalog.response.status, 200);
+  assert.equal(catalog.body.meta.total, 1);
+  const details = await request(productPath);
+  assert.deepEqual(details.body.data, catalog.body.data[0]);
+  assert.deepEqual(details.body.data.variants, [
+    { id: variant.id, sku: variant.sku, size: 'M', color: 'Black', priceMinor: 120000 },
+  ]);
+
+  cleanInventory(variant.id);
+  const stockPath = `/inventory/stock/${variant.id}`;
+  const zero = await request(stockPath, { token: inventoryToken });
+  assert.equal(zero.response.status, 200);
+  assert.equal(zero.body.data.quantity, 0);
+  const receive = await inventoryPost('receipts', {
+    variantId: variant.id, quantity: 10, reason: 'Opening demonstration delivery',
+  }, inventoryToken);
+  assert.equal(receive.response.status, 201);
+  assert.equal(receive.body.data.quantity, 10);
+  assert.equal(receive.body.data.movement.actorId, manager.id);
+  const adjustment = await inventoryPost('adjustments', {
+    variantId: variant.id, delta: -1, reason: 'One damaged unit',
+  }, inventoryToken);
+  assert.equal(adjustment.response.status, 201);
+  assert.equal(adjustment.body.data.quantity, 9);
+
+  const customerEmail = email('defense-customer');
+  const registration = await request('/auth/register', {
+    method: 'POST', body: { name: 'Demo Customer', email: customerEmail, password },
+  });
+  assert.equal(registration.response.status, 201);
+  const buyer = registration.body.data.user;
+  deleteAfter.push([User, buyer.id], [Order, { userId: buyer.id }], [InventoryMovement, { actorId: buyer.id }]);
+  assert.equal(buyer.role, Role.Customer);
+  const session = await loginManaged(customerEmail);
+  assert.equal(session.response.status, 200);
+  const token = session.body.data.accessToken;
+  const profile = await request('/customers/me', { method: 'PATCH', token, body: { name: 'Demo Buyer' } });
+  assert.equal(profile.response.status, 200);
+  assert.equal(profile.body.data.name, 'Demo Buyer');
+  const address = await request('/addresses', { method: 'POST', body: addressInput, token });
+  assert.equal(address.response.status, 201);
+  const addressId = address.body.data.id;
+  const addressPath = `/addresses/${addressId}`;
+  assert.equal((await request('/addresses', { token })).body.data[0].id, addressId);
+  assert.equal((await request(addressPath, { token })).response.status, 200);
+  const updatedAddress = await request(addressPath, { method: 'PATCH', body: { line2: 'Flat 2A' }, token });
+  assert.equal(updatedAddress.response.status, 200);
+  const { token: stranger } = await createActor('defense-other');
+  assertError(await request(addressPath, { token: stranger }), 404);
+
+  const initialCart = await setCartItem(variant.id, 1, token);
+  assert.equal(initialCart.response.status, 200);
+  assert.equal(initialCart.body.data.totalMinor, 120000);
+  const changedCart = await setCartItem(variant.id, 2, token);
+  assert.equal(changedCart.response.status, 200);
+  const cart = await request('/cart', { token });
+  assert.equal(cart.body.data.items[0].quantity, 2);
+  assert.equal(cart.body.data.totalMinor, 240000);
+
+  const placement = await checkout(addressId, token);
+  assert.equal(placement.response.status, 201);
+  assert.match(placement.response.headers.get('x-response-time'), /^\d+\.\d{2}ms$/);
+  const order = placement.body.data;
+  assert.equal(order.totalMinor, 240000);
+  assert.deepEqual(order.shippingAddress, { ...addressInput, line2: 'Flat 2A' });
+  const [item] = order.items;
+  assert.deepEqual(item, {
+    id: item.id, variantId: variant.id, sku: variant.sku, productName: product.name,
+    quantity: 2, unitPriceMinor: 120000, size: 'M', color: 'Black',
+  });
+  assert.deepEqual((await request('/cart', { token })).body.data.items, []);
+  assert.equal((await request(stockPath, { token: inventoryToken })).body.data.quantity, 7);
+  const inventoryHistory = await request(`/inventory/movements?variantId=${variant.id}&page=1&limit=2`, {
+    token: inventoryToken,
+  });
+  assert.equal(inventoryHistory.response.status, 200);
+  assert.deepEqual(inventoryHistory.body.meta, { page: 1, limit: 2, total: 3 });
+  const [sale] = inventoryHistory.body.data;
+  assert.equal(sale.type, MovementType.Sale);
+  assert.equal(sale.actorId, buyer.id);
+  assert.equal(sale.delta, -2);
+  assert.equal(sale.reason, `Order ${order.id}`);
+  assert.equal((await db.getRepository(Order).findOneByOrFail({ id: order.id })).userId, buyer.id);
+  assert.equal(await db.getRepository(OrderItem).countBy({ orderId: order.id, variantId: variant.id }), 1);
+  const history = await request('/orders?page=1&limit=1', { token });
+  assert.deepEqual(history.body.meta, { page: 1, limit: 1, total: 1 });
+  assert.equal(history.body.data[0].id, order.id);
+  const orderPath = `/orders/${order.id}`;
+  assert.deepEqual((await request(orderPath, { token })).body.data, order);
+  assertError(await request(orderPath, { token: stranger }), 404);
+});
+
+test('OpenAPI exposes all 50 registered application operations', async () => {
+  const result = await request('/docs-json');
+  assert.equal(result.response.status, 200);
+  const paths = Object.entries(result.body.paths);
+  const count = (prefix) => paths.filter(([path]) => path.startsWith(prefix))
+    .reduce((total, [, operations]) => total + Object.keys(operations).length, 0);
+  assert.deepEqual([
+    count('/api/admin'), count('/api/staff'), count('/api/inventory'), count('/api/products'),
+    count('/api/auth'), count('/api/health'),
+  ], [6, 20, 5, 2, 3, 1]);
+  assert.equal(paths.reduce((total, [, operations]) => total + Object.keys(operations).length, 0), 50);
 });
