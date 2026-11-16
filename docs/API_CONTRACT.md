@@ -1,6 +1,6 @@
 # Minimal THREAD API Contract
 
-All application routes use the `/api` prefix. Open `/api/docs` on the running app to try the live starter and Customer routes. This contract also lists planned routes for the other domains.
+All application routes use the `/api` prefix. Open `/api/docs` on the running app to try the live starter, Customer, and Inventory routes. This contract also lists planned Staff and Admin routes.
 
 ## Live starter routes
 
@@ -61,19 +61,19 @@ Each resource has the following endpoints. Collection membership is managed by p
 
 Use the entity length limits, lowercase URL slugs, and nonnegative integer prices. Public reads show active products and active variants whose parent is active. Add Staff-only `GET /api/staff/products` and `GET /api/staff/variants` paginated lists that include inactive records. Use the returned IDs for updates and deletes. Validate referenced category, product, and collection IDs before writing. Keep a variant on its original product after creation. Delete conflicts follow the rules in the specification.
 
-## Inventory routes to implement
+## Live Inventory routes
 
-All these routes require Inventory Manager. Movements record the user from the token and a reason supplied in the request. Stock and movement rows change together in one transaction.
+All these routes require the Inventory Manager or Admin role. Movements record the authenticated actor and the supplied reason. Stock and movement rows change together in one transaction.
 
 | Method | Path | Body or result | Success |
 | --- | --- | --- | --- |
-| GET | `/api/inventory/stock` | Paginated counts by variant | 200 |
-| GET | `/api/inventory/stock/:variantId` | Count for one existing variant | 200 |
+| GET | `/api/inventory/stock` | Paginated balances and product details by variant, with optional `variantId` filter | 200 |
+| GET | `/api/inventory/stock/:variantId` | Balance and product details for one existing variant | 200 |
 | POST | `/api/inventory/receipts` | `{ variantId, quantity, reason }`. Positive receipt quantity | 201 |
 | POST | `/api/inventory/adjustments` | `{ variantId, delta, reason }`. Nonzero signed integer | 201 |
 | GET | `/api/inventory/movements` | Paginated newest-first movement history with optional `variantId` filter | 200 |
 
-Return 404 for an unknown variant and 409 for an adjustment that would bring stock below zero. A variant without a stock row has quantity zero.
+Detail and mutation routes return 404 for an unknown variant. Mutations return 409 when the result would be negative or exceed the PostgreSQL integer limit. A variant without a stock row has quantity zero. An increase can establish that row. A successful receipt or adjustment returns the updated balance and its movement. Movement history includes checkout sales.
 
 ## Admin routes to implement
 

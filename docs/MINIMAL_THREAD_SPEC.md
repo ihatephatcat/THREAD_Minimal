@@ -11,11 +11,11 @@ Minimal THREAD is a single-brand fashion e-commerce REST API using NestJS, TypeS
 | `customer` | Own profile, addresses, cart, checkout, and order history |
 | `staff` | Manage categories, collections, products, and variants |
 | `inventory_manager` | Read stock and movements, receive stock, and adjust stock |
-| `admin` | Manage Staff and Inventory Manager accounts |
+| `admin` | Manage Staff and Inventory Manager accounts and access Inventory routes |
 | All active users | Authenticate and query their identity |
 | Public | Health, customer registration and login, and planned catalog reads |
 
-Roles are explicit and non-hierarchical. The Admin route checks the Admin role. Staff and Inventory Manager routes check their respective roles. Registration always creates a Customer, and privileged users use the same login endpoint. The bootstrap command creates the initial Admin. Deactivating a user invalidates access on the next authenticated request because the guard loads the current active account.
+Roles are explicit and non-hierarchical. The Admin route checks the Admin role. Staff routes check the Staff role. Inventory routes explicitly allow Inventory Manager and Admin. Registration always creates a Customer, and privileged users use the same login endpoint. The bootstrap command creates the initial Admin. Deactivating a user invalidates access on the next authenticated request because the guard loads the current active account.
 
 ## Canonical PostgreSQL schema
 
@@ -37,7 +37,7 @@ The TypeORM entities and initial migration are authoritative. Entity rows use UU
 | `orders` | `userId`, `shippingAddress` snapshot, `totalMinor` |
 | `order_items` | `orderId`, `variantId`, snapshot of `sku`, `productName`, `size`, `color`, and `unitPriceMinor`, plus `quantity`. Each variant appears once per order |
 
-A category has many products, a product has many variants, and products can belong to many collections. A variant has at most one inventory stock row. Missing stock counts as zero. Inventory creates the first stock row on receipt, with a concurrency-safe insert or upsert. Inventory owns quantity and movement writes. Each receipt or adjustment writes the balance and movement together and respects the nonnegative stock constraint.
+A category has many products, a product has many variants, and products can belong to many collections. A variant has at most one inventory stock row. Missing stock counts as zero. A stock increase can create the first stock row with a concurrency-safe insert. Inventory owns quantity and movement writes. Each receipt or adjustment writes the balance and movement together and respects the nonnegative stock constraint.
 
 A user has many addresses and orders and at most one cart. Create the cart on first mutation. Cart and order items belong to their parent. Hard deletes that would break retained relationships return 409. Clear collection membership in the same transaction before deleting a collection. A variant with retained movements or order items can be deactivated. An unused variant with a stock row can be deleted only after removing an empty stock row in the same transaction. Keep completed orders and their snapshots readable after address and catalog edits.
 
@@ -85,7 +85,7 @@ The starter includes Swagger with bearer authentication, versioned migrations, v
 
 - Customer has implemented profile, addresses, cart, order history, and transactional checkout with PostgreSQL tests. The [Customer viva and demo guide](CUSTOMER_VIVA.md) covers these routes, request logging, and checkout timing.
 - Staff implements the four CRUD resources, then checks catalog visibility and deletion behavior.
-- Inventory implements stock and movement reads, then stock receipts and adjustments with transaction tests.
+- Inventory has implemented stock and movement reads, receipts, and adjustments with concurrency and rollback tests. See the [Inventory viva guide](INVENTORY_VIVA.md).
 - Admin implements staff account listing, creation, role updates between staff roles, and activation changes, then verifies the complete role matrix.
 
 Use the [API contract](API_CONTRACT.md) to implement the routes and review the end-to-end behavior.

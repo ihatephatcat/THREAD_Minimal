@@ -44,6 +44,10 @@ To run Minimal THREAD alongside Current THREAD on port 3000, set `PORT=3001` in 
 
 To try the Admin route, set `ADMIN_EMAIL` and `ADMIN_PASSWORD` in `.env` and run `npm run seed:admin` after migrating. Use a distinct email from the customer account. The seed can be rerun and preserves an existing active Admin and its password. Login through the same Swagger login route and authorize with the returned Admin token.
 
+## Inventory
+
+The **Inventory** section in Swagger lets Inventory Managers and Admins view stock, receive deliveries, adjust balances, and read movement history, including checkout sales. Use an existing variant ID. The [Inventory viva guide](docs/INVENTORY_VIVA.md) includes example requests, expected responses, and a rollback demonstration.
+
 ## Verify and extend
 
 ```sh
