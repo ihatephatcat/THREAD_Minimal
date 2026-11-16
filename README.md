@@ -2,6 +2,8 @@
 
 Minimal THREAD is a NestJS and PostgreSQL starter for the CSC4161 e-commerce backend. It runs with health, authentication, Customer shopping, Inventory management, Staff CRUD, public product browsing, and Admin account management. See the [API contract](docs/API_CONTRACT.md) and [Customer viva guide](docs/CUSTOMER_VIVA.md).
 
+For the defense, use the [complete Swagger demonstration](docs/FINAL_SWAGGER_DEMO.md), the [final viva reference](docs/FINAL_VIVA_REFERENCE.md), and the [faculty requirements matrix](docs/FACULTY_REQUIREMENTS_VERIFICATION.md). The demo guide covers the persistent Windows PostgreSQL service, schema migrations, and Admin bootstrap.
+
 ## Run locally
 
 Use Node.js 22 or newer, npm, and PostgreSQL. The optional Docker Compose service supplies a local PostgreSQL 16 instance.
