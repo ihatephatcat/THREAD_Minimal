@@ -53,7 +53,7 @@ export class HttpExceptionFilter implements ExceptionFilter {
       if (code === '23505') {
         return { statusCode: 409, message: 'A record with that value already exists' };
       }
-      if (code === '23503') {
+      if (code === '23503' || code === '23001') {
         return { statusCode: 409, message: 'A related record prevents this change' };
       }
       if (code === '23514' || code === '22003') {
