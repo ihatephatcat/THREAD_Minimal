@@ -1,8 +1,6 @@
 # Minimal THREAD
 
-Minimal THREAD is a NestJS and PostgreSQL starter for the CSC4161 e-commerce backend. It runs with health, authentication, Customer shopping, Inventory management, Staff CRUD, public product browsing, and Admin account management. See the [API contract](docs/API_CONTRACT.md) and [Customer viva guide](docs/CUSTOMER_VIVA.md).
-
-For the defense, use the [complete Swagger demonstration](docs/FINAL_SWAGGER_DEMO.md), the [final viva reference](docs/FINAL_VIVA_REFERENCE.md), and the [faculty requirements matrix](docs/FACULTY_REQUIREMENTS_VERIFICATION.md). The demo guide covers the persistent Windows PostgreSQL service, schema migrations, and Admin bootstrap.
+Minimal THREAD is a NestJS and PostgreSQL starter for the CSC4161 e-commerce backend. It runs with health, authentication, Customer shopping, Inventory management, Staff CRUD, public product browsing, and Admin account management.
 
 ## Run locally
 
@@ -48,15 +46,15 @@ To try the Admin route, set `ADMIN_EMAIL` and `ADMIN_PASSWORD` in `.env` and run
 
 ## Inventory
 
-The **Inventory** section in Swagger lets Inventory Managers and Admins view stock, receive deliveries, adjust balances, and read movement history, including checkout sales. Use an existing variant ID. The [Inventory viva guide](docs/INVENTORY_VIVA.md) includes example requests, expected responses, and a rollback demonstration.
+The **Inventory** section in Swagger lets Inventory Managers and Admins view stock, receive deliveries, adjust balances, and read movement history, including checkout sales. Use an existing variant ID.
 
 ## Staff catalog
 
-Run `npm run migration:run` to apply collection activation before starting the updated app. Staff and Admin can manage categories, collections, products, and variants through the **Staff** sections in Swagger. The **Public Catalog** section shows active products with active variants and current prices. Use the [Staff viva guide](docs/STAFF_VIVA.md) to create a variant, receive stock, and purchase it through Checkout.
+Run `npm run migration:run` to apply collection activation before starting the updated app. Staff and Admin can manage categories, collections, products, and variants through the **Staff** sections in Swagger. The **Public Catalog** section shows active products with active variants and current prices. To try the purchasing workflow, create a variant as Staff, receive stock as Inventory Manager, and purchase it through Checkout as Customer.
 
 ## Admin
 
-After seeding and signing in as Admin, use the **Admin** section in Swagger to create Staff and Inventory Manager accounts, list or update them, and deactivate them. Deactivation blocks login and protected requests while retaining the user's ID for historical Inventory movements. See the [Admin viva guide](docs/ADMIN_VIVA.md) for examples and the four-role demo.
+After seeding and signing in as Admin, use the **Admin** section in Swagger to create Staff and Inventory Manager accounts, list or update them, and deactivate them. Deactivation blocks login and protected requests while retaining the user's ID for historical Inventory movements.
 
 ## Verify and extend
 
@@ -82,4 +80,4 @@ In Bash use `DB_NAME=minimal_thread_test npm run migration:run` and `TEST_DB_NAM
 
 Use `npm run migration:generate -- src/database/migrations/MeaningfulName` after changing a canonical entity. `npm run migration:revert` rolls back the last applied migration and can remove data with its tables. Run migration rollback experiments against a disposable database.
 
-Start with [AGENTS.md](AGENTS.md) for team boundaries and the [project specification](docs/MINIMAL_THREAD_SPEC.md) for schema, checkout, and course coverage.
+Start with [AGENTS.md](AGENTS.md) for team boundaries and development conventions.
