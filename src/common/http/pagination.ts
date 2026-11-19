@@ -3,14 +3,14 @@ import { Type } from 'class-transformer';
 import { IsInt, Max, Min } from 'class-validator';
 
 export class PageQueryDto {
-  @ApiPropertyOptional({ default: 1, minimum: 1, maximum: 100_000 })
+  @ApiPropertyOptional({ type: 'integer', default: 1, minimum: 1, maximum: 100_000 })
   @Type(() => Number)
   @IsInt()
   @Min(1)
   @Max(100_000)
   page = 1;
 
-  @ApiPropertyOptional({ default: 20, minimum: 1, maximum: 100 })
+  @ApiPropertyOptional({ type: 'integer', default: 20, minimum: 1, maximum: 100 })
   @Type(() => Number)
   @IsInt()
   @Min(1)

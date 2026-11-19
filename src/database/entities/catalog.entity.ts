@@ -26,6 +26,9 @@ export class Category extends CatalogEntry {
 export class Collection extends CatalogEntry {
   @ManyToMany(() => Product, (product) => product.collections)
   products!: Product[];
+
+  @Column({ default: true })
+  isActive!: boolean;
 }
 
 @Entity('products')
